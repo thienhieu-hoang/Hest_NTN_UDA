@@ -1,7 +1,4 @@
-""" helper functions for GAN FiLM model 
-    input shape: [batch_size, 2, 792, 14] = [batch_size, 2, nsubcs, nsymbs] - CSI-RS-estimated channel at slot 6
-        conditional input shape: [batch_size, 2, 792, 1] = [batch_size, 2, nsubcs, 1] - CSI-RS-estimated channel at symbol 2 slot 1
-    Output shape: [batch_size, 2, 792, 14]
+""" helper functions and classes for GAN model 
 """
 import tensorflow as tf
 from tensorflow.keras import layers
@@ -14,6 +11,7 @@ import sys
 import os 
 
 from dataclasses import dataclass
+import utils
 
 
 @dataclass
@@ -30,19 +28,16 @@ class train_step_Output:
     film_features_target: tf.Tensor = None  # Film features from the target domain, if return_features is True
     pad: float = 0
 
-try:
-    # Works in .py scripts
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.abspath(os.path.join(base_dir, '..', '..', '..'))
-except NameError:
-    # __file__ is not defined in Jupyter Notebook
-    notebook_dir = os.getcwd()
-    project_root = os.path.abspath(os.path.join(notebook_dir, '..', '..'))
-sys.path.append(project_root)
+# try:
+#     # Works in .py scripts
+#     base_dir = os.path.dirname(os.path.abspath(__file__))
+#     project_root = os.path.abspath(os.path.join(base_dir, '..', '..', '..'))
+# except NameError:
+#     # __file__ is not defined in Jupyter Notebook
+#     notebook_dir = os.getcwd()
+#     project_root = os.path.abspath(os.path.join(notebook_dir, '..', '..'))
+# sys.path.append(project_root)
 
-import Est_btween_CSIRS.helper.utils_CNN_FiLM as utils_CNN_FiLM
-import Est_btween_CSIRS.helper.utils as utils_CNN
-from utils_GAN_FiLM import GAN_FiLM, GradientReversal, DomainDiscriminator3
     
 # Domain labels
 def make_domain_labels(batch_size, domain):
@@ -52,21 +47,192 @@ def make_domain_labels(batch_size, domain):
 def reflect_padding_2d(x, pad_h, pad_w):
     return tf.pad(x, [[0, 0], [pad_h, pad_h], [pad_w, pad_w], [0, 0]], mode='SYMMETRIC')
 
-class GAN(GAN_FiLM):
-    def __init__(self, n_subc=312, gen_l2=None, disc_l2=None):
-        super().__init__(n_subc=n_subc, gen_l2=gen_l2, disc_l2=disc_l2)
+class InstanceNormalization(tf.keras.layers.Layer):
+    def __init__(self, epsilon=1e-5, **kwargs):
+        super().__init__(**kwargs)
+        self.epsilon = epsilon
 
-    def call(self, inputs, training=False):
-        super().call(inputs=inputs, training=training)
-        return super().call(inputs=inputs, training=training)
+    def build(self, input_shape):
+        # gamma and beta for each channel
+        self.gamma = self.add_weight(
+            shape=(input_shape[-1],),
+            initializer="ones",
+            trainable=True,
+            name="gamma"
+        )
+        self.beta = self.add_weight(
+            shape=(input_shape[-1],),
+            initializer="zeros",
+            trainable=True,
+            name="beta"
+        )
+
+class GradientReversal(tf.keras.layers.Layer):
+    def __init__(self):
+        super().__init__()
+
+    def call(self, x):
+        @tf.custom_gradient
+        def reverse_gradient(x):
+            def grad(dy):
+                return -dy  # Reverse the gradient
+            return x, grad
+        return reverse_gradient(x)
+        
+class UNetBlock(tf.keras.layers.Layer):
+    def __init__(self, filters, apply_dropout=False, kernel_size=(4,3), strides=(2,1), pad_h=0, pad_w=1, gen_l2=None):
+        super().__init__()
+        kernel_regularizer = tf.keras.regularizers.l2(gen_l2) if gen_l2 is not None else None
+        self.pad_h = pad_h
+        self.pad_w = pad_w
+        self.conv = tf.keras.layers.Conv2D(filters, kernel_size = kernel_size, strides=strides, padding='valid',
+                                            kernel_regularizer=kernel_regularizer)
+        self.norm = InstanceNormalization()
+        self.dropout = tf.keras.layers.Dropout(0.3) if apply_dropout else None
+
+    def call(self, x, cond, training):
+        if self.pad_h > 0 or self.pad_w > 0:
+            x = reflect_padding_2d(x, pad_h=0, pad_w=1)  # symmetric padding
+        x = self.conv(x)
+        x = self.norm(x, training=training)
+        x = tf.nn.leaky_relu(x)
+        if self.dropout:
+            x = self.dropout(x, training=training)
+        return x
     
-class DomainDisc(DomainDiscriminator3):
-    def __init__(self, l2_reg=None):
-        super().__init__(l2_reg=l2_reg)
+class UNetUpBlock(tf.keras.layers.Layer):
+    def __init__(self, filters, apply_dropout=False, kernel_size=(4,3), strides=(2,1), gen_l2=None):
+        super().__init__()
+        kernel_regularizer = tf.keras.regularizers.l2(gen_l2) if gen_l2 is not None else None
+        self.deconv = tf.keras.layers.Conv2DTranspose(filters, kernel_size=kernel_size, strides=strides,
+                                                        padding='valid', kernel_regularizer=kernel_regularizer)
+        self.norm = InstanceNormalization()
+        self.dropout = tf.keras.layers.Dropout(0.3) if apply_dropout else None
+
+    def call(self, x, skip, cond, training):
+        x = self.deconv(x)
+        if x.shape[2] >14: 
+            x = x[:, :, 1:15, :]
+        x = self.norm(x, training=training)
+        x = tf.nn.relu(x)
+        if self.dropout:
+            x = self.dropout(x, training=training)
+        x = tf.concat([x, skip], axis=-1)
+        return x
+
+class Pix2PixGenerator(tf.keras.Model):
+    def __init__(self, output_channels=2, n_subc=792, gen_l2=None):
+        super().__init__()
+        kernel_regularizer = tf.keras.regularizers.l2(gen_l2) if gen_l2 is not None else None
+        if n_subc == 792 or n_subc==312:
+            # Encoder
+            self.down1 = UNetBlock(64, apply_dropout=False, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+            self.down2 = UNetBlock(128, kernel_size=(5,3), strides=(2,1), gen_l2=gen_l2)
+            self.down3 = UNetBlock(256, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+            self.down4 = UNetBlock(512, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+            # Decoder
+            self.up1 = UNetUpBlock(256, apply_dropout=True, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+            self.up2 = UNetUpBlock(128, apply_dropout=True, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+            self.up3 = UNetUpBlock(64, kernel_size=(5,3), strides=(2,1), gen_l2=gen_l2)
+            self.last = tf.keras.layers.Conv2DTranspose(output_channels, kernel_size=(4,3), strides=(2,1), padding='valid',
+                                                        activation='tanh', kernel_regularizer=kernel_regularizer)
+            
+    def call(self, x, cond, training=False):
+        # Encoder
+        d1 = self.down1(x, cond, training=training)      # (batch, 395, 12, C_out)
+        d2 = self.down2(d1, cond, training=training)     # (batch, 196, 10, C_out)
+        d3 = self.down3(d2, cond, training=training)     # (batch,  97, 8, C_out)
+        d4 = self.down4(d3, cond, training=training)     # (batch,  48, 6, C_out)
+        # Decoder with skip connections
+        u1 = self.up1(d4, d3, cond, training=training)   # (batch,  97, 8, C_out)
+        u2 = self.up2(u1, d2, cond, training=training)   # (batch, 196, 10, C_out)
+        u3 = self.up3(u2, d1, cond, training=training)   # (batch, 395, 12, C_out)
+        u4 = self.last(u3)  # (batch, 792, 14 or 16, C_out)
+        if u4.shape[2] > 14:
+            u4 = u4[:, :, 1:15, :]
+        return u4, d4
+
+class PatchGANDiscriminator(tf.keras.Model):
+    """
+    PatchGAN Discriminator for Pix2Pix GAN.
+    Input: (batch, H, W, C)
+    Output: (batch, H_out, W_out, 1) patch-level real/fake probabilities
+    """
+    def __init__(self, filters=[64, 128, 256, 512], n_subc=792, disc_l2=None):
+        super().__init__()
+        kernel_regularizer = tf.keras.regularizers.l2(disc_l2) if disc_l2 is not None else None
+        if n_subc==792 or n_subc==312:
+            self.conv1 = tf.keras.layers.Conv2D(filters[0], kernel_size=(4,3), strides=(2,1), padding='valid',
+                                                kernel_regularizer=kernel_regularizer)
+            self.conv2 = tf.keras.layers.Conv2D(filters[1], kernel_size=(5,3), strides=(2,1), padding='valid',
+                                                kernel_regularizer=kernel_regularizer)
+            self.norm2 = InstanceNormalization()
+            self.conv3 = tf.keras.layers.Conv2D(filters[2], kernel_size=(4,3), strides=(2,1), padding='valid',
+                                                kernel_regularizer=kernel_regularizer)
+            self.norm3 = InstanceNormalization()
+            self.conv4 = tf.keras.layers.Conv2D(filters[3], kernel_size=(3,3), strides=(2,1), padding='valid',
+                                                kernel_regularizer=kernel_regularizer)
+            self.norm4 = InstanceNormalization()
+            self.last = tf.keras.layers.Conv2D(1, kernel_size=(4,3), strides=(2,1), padding='valid',
+                                                kernel_regularizer=kernel_regularizer)  # Output: patch map
+
+    def call(self, x, training=False):
+        x = tf.nn.leaky_relu(self.conv1(x), alpha=0.2)  # (batch, 395, 12, C_out)
+        x = tf.nn.leaky_relu(self.norm2(self.conv2(x), training=training), alpha=0.2)  # (batch, 196, 10, C_out)
+        x = tf.nn.leaky_relu(self.norm3(self.conv3(x), training=training), alpha=0.2)  # (batch, 97, 8, C_out)
+        x = tf.nn.leaky_relu(self.norm4(self.conv4(x), training=training), alpha=0.2)  # (batch, 48, 6, C_out)
+        return self.last(x)  # (batch, 23, 3, 1) - patch-level real/fake probabilities
+
+class GAN_Output:
+    """Dataclass to hold the output of the GAN model."""
+    def __init__(self, gen_out, disc_out, extracted_features):
+        self.gen_out = gen_out  # Generator output
+        self.disc_out = disc_out  # Discriminator output
+        self.extracted_features = extracted_features  # Extracted features
+        
+class GAN(tf.keras.Model):
+    def __init__(self, n_subc=792, generator=Pix2PixGenerator, discriminator=PatchGANDiscriminator, gen_l2=None, disc_l2=None):
+        super().__init__()
+        self.generator = generator(n_subc=n_subc, gen_l2=gen_l2)
+        self.discriminator = discriminator(n_subc=n_subc, disc_l2=disc_l2)
 
     def call(self, inputs, training=False):
-        super().call(inputs=inputs, training=training)
-        return super().call(inputs=inputs, training=training)
+        # Optionally implement a forward pass if needed
+        if isinstance(inputs, tuple):
+            x, cond = inputs
+        else:
+            x, cond = inputs, None
+        gen_out, features = self.generator(x, cond, training=training)
+        disc_out = self.discriminator(gen_out, training=training)
+        return GAN_Output(
+            gen_out=gen_out,
+            disc_out=disc_out,
+            extracted_features=features
+        )
+    
+class DomainDisc(tf.keras.Model):
+    """ conv 3 times, then global average pooling, then dense layers 
+        extracted features with shape [batch, 48, 6, C_out] (C_out= 512 or 128)
+    """
+    def __init__(self, l2_reg=None):
+        super().__init__()
+        kernel_regularizer = tf.keras.regularizers.l2(l2_reg) if l2_reg is not None else None
+        self.conv1 = tf.keras.layers.Conv2D(256, kernel_size=(4,3), strides=(2,1), padding='valid', 
+                                            activation='relu', kernel_regularizer=kernel_regularizer)
+        self.conv2 = tf.keras.layers.Conv2D(128, kernel_size=(3,2), strides=(2,1), padding='valid', 
+                                            activation='relu', kernel_regularizer=kernel_regularizer)
+        self.conv3 = tf.keras.layers.Conv2D(64, kernel_size=(3,2), strides=(2,1), padding='valid', 
+                                            activation='relu', kernel_regularizer=kernel_regularizer)
+        self.pool = tf.keras.layers.GlobalAveragePooling2D()
+        self.fc1 = tf.keras.layers.Dense(64, activation='relu')
+        self.out = tf.keras.layers.Dense(1, activation='sigmoid')
+    def call(self, x):
+        x = self.conv1(x)  # (batch, 23, 4, 256)
+        x = self.conv2(x)  # (batch, 11, 3, 128)
+        x = self.conv3(x)  # (batch, 5, 2, 64)
+        x = self.pool(x)   # (batch, 64)
+        x = self.fc1(x)    # (batch, 64)
+        return self.out(x) # (batch, 1) - domain probability
 
 # ================= GAN Training Step =====================
 def train_step_gan(model, domain_model, loader_H, loss_fn, optimizers, lower_range=-1, return_features=False,
@@ -114,20 +280,20 @@ def train_step_gan(model, domain_model, loader_H, loss_fn, optimizers, lower_ran
         N_train += x_src.shape[0] + x_tgt.shape[0]
 
         # Preprocess (source)
-        x_src = utils_CNN.complx2real(x_src)
-        y_src = utils_CNN.complx2real(y_src)
+        x_src = utils.complx2real(x_src)
+        y_src = utils.complx2real(y_src)
         x_src = np.transpose(x_src, (0, 2, 3, 1))
         y_src = np.transpose(y_src, (0, 2, 3, 1))
-        x_scaled_src, _, _ = utils_CNN.minmaxScaler(x_src, lower_range=lower_range)
-        y_scaled_src, _, _ = utils_CNN.minmaxScaler(y_src, lower_range=lower_range)
+        x_scaled_src, _, _ = utils.minmaxScaler(x_src, lower_range=lower_range)
+        y_scaled_src, _, _ = utils.minmaxScaler(y_src, lower_range=lower_range)
 
         # Preprocess (target)
-        x_tgt = utils_CNN.complx2real(x_tgt)
-        y_tgt = utils_CNN.complx2real(y_tgt)
+        x_tgt = utils.complx2real(x_tgt)
+        y_tgt = utils.complx2real(y_tgt)
         x_tgt = np.transpose(x_tgt, (0, 2, 3, 1))
         y_tgt = np.transpose(y_tgt, (0, 2, 3, 1))
-        x_scaled_tgt, _, _ = utils_CNN.minmaxScaler(x_tgt, lower_range=lower_range)
-        y_scaled_tgt, _, _ = utils_CNN.minmaxScaler(y_tgt, lower_range=lower_range)
+        x_scaled_tgt, _, _ = utils.minmaxScaler(x_tgt, lower_range=lower_range)
+        y_scaled_tgt, _, _ = utils.minmaxScaler(y_tgt, lower_range=lower_range)
 
         # === 1. Train Discriminator ===
         with tf.GradientTape() as tape_d:
@@ -290,25 +456,25 @@ def val_step(model, domain_model, loader_H, loss_fn, lower_range, nsymb=14, adv_
         N_val_target += x_tgt.shape[0]
 
         # Preprocess (source)
-        x_src_real = utils_CNN.complx2real(x_src)
-        y_src_real = utils_CNN.complx2real(y_src)
+        x_src_real = utils.complx2real(x_src)
+        y_src_real = utils.complx2real(y_src)
         x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
         y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
-        x_scaled_src, x_min_src, x_max_src = utils_CNN.minmaxScaler(x_src_real, lower_range=lower_range)
-        y_scaled_src, _, _ = utils_CNN.minmaxScaler(y_src_real, lower_range=lower_range)
+        x_scaled_src, x_min_src, x_max_src = utils.minmaxScaler(x_src_real, lower_range=lower_range)
+        y_scaled_src, _, _ = utils.minmaxScaler(y_src_real, lower_range=lower_range)
 
         # Preprocess (target)
-        x_tgt_real = utils_CNN.complx2real(x_tgt)
-        y_tgt_real = utils_CNN.complx2real(y_tgt)
+        x_tgt_real = utils.complx2real(x_tgt)
+        y_tgt_real = utils.complx2real(y_tgt)
         x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
         y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
-        x_scaled_tgt, x_min_tgt, x_max_tgt = utils_CNN.minmaxScaler(x_tgt_real, lower_range=lower_range)
-        y_scaled_tgt, _, _ = utils_CNN.minmaxScaler(y_tgt_real, lower_range=lower_range)
+        x_scaled_tgt, x_min_tgt, x_max_tgt = utils.minmaxScaler(x_tgt_real, lower_range=lower_range)
+        y_scaled_tgt, _, _ = utils.minmaxScaler(y_tgt_real, lower_range=lower_range)
 
         # === Source domain prediction ===
         preds_src, features_src = model.generator(x_scaled_src, cond=None, training=False)
         preds_src = preds_src.numpy() if hasattr(preds_src, 'numpy') else preds_src
-        preds_src_descaled = utils_CNN.deMinMax(preds_src, x_min_src, x_max_src, lower_range=lower_range)
+        preds_src_descaled = utils.deMinMax(preds_src, x_min_src, x_max_src, lower_range=lower_range)
         batch_est_loss_source = loss_fn_est(y_scaled_src, preds_src).numpy()
         epoc_loss_est_source += batch_est_loss_source * x_src.shape[0]
         mse_val_source = np.mean((preds_src_descaled - y_src_real) ** 2, axis=(1, 2, 3))
@@ -318,7 +484,7 @@ def val_step(model, domain_model, loader_H, loss_fn, lower_range, nsymb=14, adv_
         # === Target domain prediction ===
         preds_tgt, features_tgt = model.generator(x_scaled_tgt, cond=None, training=False)
         preds_tgt = preds_tgt.numpy() if hasattr(preds_tgt, 'numpy') else preds_tgt
-        preds_tgt_descaled = utils_CNN.deMinMax(preds_tgt, x_min_tgt, x_max_tgt, lower_range=lower_range)
+        preds_tgt_descaled = utils.deMinMax(preds_tgt, x_min_tgt, x_max_tgt, lower_range=lower_range)
         batch_est_loss_target = loss_fn_est(y_scaled_tgt, preds_tgt).numpy()
         epoc_loss_est_target += batch_est_loss_target * x_tgt.shape[0]
         mse_val_target = np.mean((preds_tgt_descaled - y_tgt_real) ** 2, axis=(1, 2, 3))
@@ -476,20 +642,20 @@ def train_step_wgan_gp(model, domain_model, loader_H, loss_fn, optimizers, lower
         N_train += x_src.shape[0] + x_tgt.shape[0]
 
         # Preprocess (source)
-        x_src = utils_CNN.complx2real(x_src)
-        y_src = utils_CNN.complx2real(y_src)
+        x_src = utils.complx2real(x_src)
+        y_src = utils.complx2real(y_src)
         x_src = np.transpose(x_src, (0, 2, 3, 1))
         y_src = np.transpose(y_src, (0, 2, 3, 1))
-        x_scaled_src, x_min_src, x_max_src = utils_CNN.minmaxScaler(x_src, lower_range=lower_range, linear_interp=linear_interp)
-        y_scaled_src, _, _ = utils_CNN.minmaxScaler(y_src, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+        x_scaled_src, x_min_src, x_max_src = utils.minmaxScaler(x_src, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = utils.minmaxScaler(y_src, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
 
         # Preprocess (target)
-        x_tgt = utils_CNN.complx2real(x_tgt)
-        y_tgt = utils_CNN.complx2real(y_tgt)
+        x_tgt = utils.complx2real(x_tgt)
+        y_tgt = utils.complx2real(y_tgt)
         x_tgt = np.transpose(x_tgt, (0, 2, 3, 1))
         y_tgt = np.transpose(y_tgt, (0, 2, 3, 1))
-        x_scaled_tgt, x_min_tgt, x_max_tgt = utils_CNN.minmaxScaler(x_tgt, lower_range=lower_range, linear_interp=linear_interp)
-        y_scaled_tgt, _, _ = utils_CNN.minmaxScaler(y_tgt, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+        x_scaled_tgt, x_min_tgt, x_max_tgt = utils.minmaxScaler(x_tgt, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_tgt, _, _ = utils.minmaxScaler(y_tgt, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
 
         # === 1. Train Discriminator ===
         # Only considering source domain
@@ -661,25 +827,25 @@ def val_step_wgan_gp(model, domain_model, loader_H, loss_fn, lower_range, nsymb=
         N_val_target += x_tgt.shape[0]
 
         # Preprocess (source)
-        x_src_real = utils_CNN.complx2real(x_src)
-        y_src_real = utils_CNN.complx2real(y_src)
+        x_src_real = utils.complx2real(x_src)
+        y_src_real = utils.complx2real(y_src)
         x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
         y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
-        x_scaled_src, x_min_src, x_max_src = utils_CNN.minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
-        y_scaled_src, _, _ = utils_CNN.minmaxScaler(y_src_real, min_pre=x_min_src, max_pre=x_max_src,  lower_range=lower_range)
+        x_scaled_src, x_min_src, x_max_src = utils.minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = utils.minmaxScaler(y_src_real, min_pre=x_min_src, max_pre=x_max_src,  lower_range=lower_range)
 
         # Preprocess (target)
-        x_tgt_real = utils_CNN.complx2real(x_tgt)
-        y_tgt_real = utils_CNN.complx2real(y_tgt)
+        x_tgt_real = utils.complx2real(x_tgt)
+        y_tgt_real = utils.complx2real(y_tgt)
         x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
         y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
-        x_scaled_tgt, x_min_tgt, x_max_tgt = utils_CNN.minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
-        y_scaled_tgt, _, _ = utils_CNN.minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+        x_scaled_tgt, x_min_tgt, x_max_tgt = utils.minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_tgt, _, _ = utils.minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
 
         # === Source domain prediction ===
         preds_src, features_src = model.generator(x_scaled_src, cond=None, training=False)
         preds_src = preds_src.numpy() if hasattr(preds_src, 'numpy') else preds_src
-        preds_src_descaled = utils_CNN.deMinMax(preds_src, x_min_src, x_max_src, lower_range=lower_range)
+        preds_src_descaled = utils.deMinMax(preds_src, x_min_src, x_max_src, lower_range=lower_range)
         batch_est_loss_source = loss_fn_est(y_scaled_src, preds_src).numpy()
         epoc_loss_est_source += batch_est_loss_source * x_src.shape[0]
         mse_val_source = np.mean((preds_src_descaled - y_src_real) ** 2, axis=(1, 2, 3))
@@ -689,7 +855,7 @@ def val_step_wgan_gp(model, domain_model, loader_H, loss_fn, lower_range, nsymb=
         # === Target domain prediction ===
         preds_tgt, features_tgt = model.generator(x_scaled_tgt, cond=None, training=False)
         preds_tgt = preds_tgt.numpy() if hasattr(preds_tgt, 'numpy') else preds_tgt
-        preds_tgt_descaled = utils_CNN.deMinMax(preds_tgt, x_min_tgt, x_max_tgt, lower_range=lower_range)
+        preds_tgt_descaled = utils.deMinMax(preds_tgt, x_min_tgt, x_max_tgt, lower_range=lower_range)
         batch_est_loss_target = loss_fn_est(y_scaled_tgt, preds_tgt).numpy()
         epoc_loss_est_target += batch_est_loss_target * x_tgt.shape[0]
         mse_val_target = np.mean((preds_tgt_descaled - y_tgt_real) ** 2, axis=(1, 2, 3))
