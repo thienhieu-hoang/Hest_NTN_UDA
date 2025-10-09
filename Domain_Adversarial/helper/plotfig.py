@@ -86,3 +86,113 @@ def figPredChan(x, title, y, index_save, figure_save_path, name):
     plt.savefig(os.path.join(figure_save_path,  str(index_save) + name) )
     # plt.show()
     plt.clf()
+
+def plotHist(X, fig_show=False, save_path=None, name=None):
+    # to use:
+        # plotHist(H_true_source, fig_show=True, save_path=f'{notebook_dir}/../generatedChan/', name='source')
+    #
+    if not isinstance(X, np.ndarray):
+            X = np.array(X)
+
+    if np.issubdtype(X.dtype, np.void):  # "|V16" means structured (real, imag)
+        X = X.view(np.complex128).reshape(X.shape)
+        # Flatten all elements to 1D for histogram
+    X_flat = X.flatten()
+
+    # Compute magnitude and phase
+    magnitudes = np.abs(X_flat)
+    phases = np.angle(X_flat)  # in radians, range [-π, π]
+
+    # --- Plot magnitude histogram ---
+    plt.figure(figsize=(10, 4))
+    plt.hist(magnitudes, bins=400, color='blue', alpha=0.7)
+    plt.title('Distribution of Magnitudes')
+    plt.xlabel('Magnitude')
+    plt.ylabel('Count')
+    plt.grid(True)
+    if save_path is not None:
+        plt.savefig(save_path + f'magnitude_{name}.svg')
+    if fig_show:
+        plt.show()
+    plt.clf()
+
+    # --- Plot phase histogram ---
+    plt.figure(figsize=(10, 4))
+    plt.hist(phases, bins=400, color='orange', alpha=0.7)
+    plt.title('Distribution of Phases')
+    plt.xlabel('Phase (radians)')
+    plt.ylabel('Count')
+    plt.grid(True)
+    if save_path is not None:
+        plt.savefig(save_path + f'phase_{name}.svg')
+    if fig_show:
+        plt.show()
+    plt.clf()
+    
+from scipy.stats import wasserstein_distance
+
+def wasserstein_magnitude_only(X1, X2):
+    """
+    Compute Wasserstein-1 distance between the magnitude distributions
+    of two complex-valued datasets.
+    """
+    # Convert to numpy arrays
+    if not isinstance(X1, np.ndarray):
+        X1 = np.array(X1)
+    if np.issubdtype(X1.dtype, np.void):  # "|V16" means structured (real, imag)
+        X1 = X1.view(np.complex128).reshape(X1.shape)
+        
+    if not isinstance(X2, np.ndarray):
+        X2 = np.array(X2)
+    if np.issubdtype(X2.dtype, np.void):  # "|V16" means structured (real, imag)
+        X2 = X2.view(np.complex128).reshape(X2.shape)
+
+    # Compute magnitudes
+    mag1 = np.abs(X1).ravel()
+    mag2 = np.abs(X2).ravel()
+
+    # Compute 1D Wasserstein distance
+    w_dist = wasserstein_distance(mag1, mag2)
+    return w_dist
+
+
+def wasserstein_approximate(X1, X2, reg=1e-2, n_samples=10000):
+    """
+    Approximate multi-dimensional Wasserstein (Sinkhorn) distance
+    between two complex datasets, using the POT library.
+    
+    - reg: entropic regularization (higher = smoother, faster)
+    - n_samples: number of random samples for computational efficiency
+    """
+    import ot  # POT = Python Optimal Transport
+
+    # Convert to numpy arrays
+    if not isinstance(X1, np.ndarray):
+        X1 = np.array(X1)
+    if np.issubdtype(X1.dtype, np.void):  # "|V16" means structured (real, imag)
+        X1 = X1.view(np.complex128).reshape(X1.shape)
+        
+    if not isinstance(X2, np.ndarray):
+        X2 = np.array(X2)
+    if np.issubdtype(X2.dtype, np.void):  # "|V16" means structured (real, imag)
+        X2 = X2.view(np.complex128).reshape(X2.shape)
+
+    # Flatten into feature vectors (real + imag as 2 channels)
+    X1_flat = np.stack([X1.real.ravel(), X1.imag.ravel()], axis=1)
+    X2_flat = np.stack([X2.real.ravel(), X2.imag.ravel()], axis=1)
+
+    # Randomly sample to reduce computational load
+    n1, n2 = len(X1_flat), len(X2_flat)
+    idx1 = np.random.choice(n1, min(n1, n_samples), replace=False)
+    idx2 = np.random.choice(n2, min(n2, n_samples), replace=False)
+    X1_sub = X1_flat[idx1]
+    X2_sub = X2_flat[idx2]
+
+    # Uniform weights
+    a = np.ones((X1_sub.shape[0],)) / X1_sub.shape[0]
+    b = np.ones((X2_sub.shape[0],)) / X2_sub.shape[0]
+
+    # Compute Sinkhorn distance (regularized Wasserstein)
+    M = ot.dist(X1_sub, X2_sub, metric='euclidean')
+    sinkhorn_dist = ot.sinkhorn2(a, b, M, reg)
+    return float(np.sqrt(sinkhorn_dist))

@@ -15,16 +15,16 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.linear_model import LogisticRegression
 
 
-def original_PAD(loader_H_1_6_11_train_source, loader_H_1_6_11_train_target):
+def original_PAD(loader_source, loader_target):
   # Calculate initial PAD of 2 original training datasets
-  loader_H_1_6_11_train_source.reset()
-  loader_H_1_6_11_train_target.reset()
+  loader_source.reset()
+  loader_target.reset()
   all_features = []
   all_labels = []
   #
-  for batch_idx in range(loader_H_1_6_11_train_target.total_batches):
+  for batch_idx in range(loader_target.total_batches):
       # batch_target: shape (batch_size, 792, 2)
-      batch_target = loader_H_1_6_11_train_target.next_batch()  # (batch_size, 792,2)
+      batch_target = loader_target.next_batch()  # (batch_size, 792,2)
       batch_target = batch_target[:,:, 0:2]
       real_target = batch_target['real']  # (batch_size, 792,2)
       imag_target = batch_target['imag']  # (batch_size, 792,2)
@@ -33,7 +33,7 @@ def original_PAD(loader_H_1_6_11_train_source, loader_H_1_6_11_train_target):
       combined_target = np.concatenate([real_flat, imag_flat], axis=1)  # (batch_size, 3168)
       target_labels = (np.ones(combined_target.shape[0], dtype=int))
       # 
-      batch_source = loader_H_1_6_11_train_source.next_batch()  # (batch_size, 792, 3)
+      batch_source = loader_source.next_batch()  # (batch_size, 792, 3)
       batch_source = batch_source[:,:,0:2]
       real_source = batch_source['real']  # (batch_size, 792,2)
       imag_source = batch_source['imag']  # (batch_size, 792,2)
