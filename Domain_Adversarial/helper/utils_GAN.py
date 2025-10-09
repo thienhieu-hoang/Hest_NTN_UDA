@@ -66,6 +66,10 @@ class InstanceNormalization(tf.keras.layers.Layer):
             trainable=True,
             name="beta"
         )
+    def call(self, x):
+        mean, variance = tf.nn.moments(x, axes=[1, 2], keepdims=True)
+        x_norm = (x - mean) / tf.sqrt(variance + self.epsilon)
+        return self.gamma * x_norm + self.beta
 
 class GradientReversal(tf.keras.layers.Layer):
     def __init__(self):
@@ -90,9 +94,9 @@ class UNetBlock(tf.keras.layers.Layer):
         self.norm = InstanceNormalization()
         self.dropout = tf.keras.layers.Dropout(0.3) if apply_dropout else None
 
-    def call(self, x, cond, training):
+    def call(self, x, training):
         if self.pad_h > 0 or self.pad_w > 0:
-            x = reflect_padding_2d(x, pad_h=0, pad_w=1)  # symmetric padding
+            x = reflect_padding_2d(x, pad_h=self.pad_h, pad_w=self.pad_w)  # symmetric padding
         x = self.conv(x)
         x = self.norm(x, training=training)
         x = tf.nn.leaky_relu(x)
@@ -109,7 +113,7 @@ class UNetUpBlock(tf.keras.layers.Layer):
         self.norm = InstanceNormalization()
         self.dropout = tf.keras.layers.Dropout(0.3) if apply_dropout else None
 
-    def call(self, x, skip, cond, training):
+    def call(self, x, skip, training):
         x = self.deconv(x)
         if x.shape[2] >14: 
             x = x[:, :, 1:15, :]
@@ -121,32 +125,31 @@ class UNetUpBlock(tf.keras.layers.Layer):
         return x
 
 class Pix2PixGenerator(tf.keras.Model):
-    def __init__(self, output_channels=2, n_subc=792, gen_l2=None):
+    def __init__(self, output_channels=2, n_subc=132, gen_l2=None):
         super().__init__()
         kernel_regularizer = tf.keras.regularizers.l2(gen_l2) if gen_l2 is not None else None
-        if n_subc == 792 or n_subc==312:
-            # Encoder
-            self.down1 = UNetBlock(64, apply_dropout=False, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
-            self.down2 = UNetBlock(128, kernel_size=(5,3), strides=(2,1), gen_l2=gen_l2)
-            self.down3 = UNetBlock(256, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
-            self.down4 = UNetBlock(512, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
-            # Decoder
-            self.up1 = UNetUpBlock(256, apply_dropout=True, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
-            self.up2 = UNetUpBlock(128, apply_dropout=True, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
-            self.up3 = UNetUpBlock(64, kernel_size=(5,3), strides=(2,1), gen_l2=gen_l2)
-            self.last = tf.keras.layers.Conv2DTranspose(output_channels, kernel_size=(4,3), strides=(2,1), padding='valid',
-                                                        activation='tanh', kernel_regularizer=kernel_regularizer)
-            
-    def call(self, x, cond, training=False):
         # Encoder
-        d1 = self.down1(x, cond, training=training)      # (batch, 395, 12, C_out)
-        d2 = self.down2(d1, cond, training=training)     # (batch, 196, 10, C_out)
-        d3 = self.down3(d2, cond, training=training)     # (batch,  97, 8, C_out)
-        d4 = self.down4(d3, cond, training=training)     # (batch,  48, 6, C_out)
+        self.down1 = UNetBlock(32, apply_dropout=False, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+        self.down2 = UNetBlock(64, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        self.down3 = UNetBlock(128, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+        self.down4 = UNetBlock(256, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        # Decoder
+        self.up1 = UNetUpBlock(128, apply_dropout=True, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        self.up2 = UNetUpBlock(64, apply_dropout=True, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+        self.up3 = UNetUpBlock(32, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        self.last = tf.keras.layers.Conv2DTranspose(output_channels, kernel_size=(4,3), strides=(2,1), padding='valid',
+                                                    activation='tanh', kernel_regularizer=kernel_regularizer)
+            
+    def call(self, x, training=False):
+        # Encoder
+        d1 = self.down1(x, training=training)      # (batch, 395, 12, C_out)
+        d2 = self.down2(d1, training=training)     # (batch, 196, 10, C_out)
+        d3 = self.down3(d2, training=training)     # (batch,  97, 8, C_out)
+        d4 = self.down4(d3, training=training)     # (batch,  48, 6, C_out)
         # Decoder with skip connections
-        u1 = self.up1(d4, d3, cond, training=training)   # (batch,  97, 8, C_out)
-        u2 = self.up2(u1, d2, cond, training=training)   # (batch, 196, 10, C_out)
-        u3 = self.up3(u2, d1, cond, training=training)   # (batch, 395, 12, C_out)
+        u1 = self.up1(d4, d3, training=training)   # (batch,  97, 8, C_out)
+        u2 = self.up2(u1, d2, training=training)   # (batch, 196, 10, C_out)
+        u3 = self.up3(u2, d1, training=training)   # (batch, 395, 12, C_out)
         u4 = self.last(u3)  # (batch, 792, 14 or 16, C_out)
         if u4.shape[2] > 14:
             u4 = u4[:, :, 1:15, :]
@@ -158,23 +161,23 @@ class PatchGANDiscriminator(tf.keras.Model):
     Input: (batch, H, W, C)
     Output: (batch, H_out, W_out, 1) patch-level real/fake probabilities
     """
-    def __init__(self, filters=[64, 128, 256, 512], n_subc=792, disc_l2=None):
+    def __init__(self, filters=[32, 64, 128, 256], n_subc=132, disc_l2=None):
         super().__init__()
         kernel_regularizer = tf.keras.regularizers.l2(disc_l2) if disc_l2 is not None else None
-        if n_subc==792 or n_subc==312:
-            self.conv1 = tf.keras.layers.Conv2D(filters[0], kernel_size=(4,3), strides=(2,1), padding='valid',
-                                                kernel_regularizer=kernel_regularizer)
-            self.conv2 = tf.keras.layers.Conv2D(filters[1], kernel_size=(5,3), strides=(2,1), padding='valid',
-                                                kernel_regularizer=kernel_regularizer)
-            self.norm2 = InstanceNormalization()
-            self.conv3 = tf.keras.layers.Conv2D(filters[2], kernel_size=(4,3), strides=(2,1), padding='valid',
-                                                kernel_regularizer=kernel_regularizer)
-            self.norm3 = InstanceNormalization()
-            self.conv4 = tf.keras.layers.Conv2D(filters[3], kernel_size=(3,3), strides=(2,1), padding='valid',
-                                                kernel_regularizer=kernel_regularizer)
-            self.norm4 = InstanceNormalization()
-            self.last = tf.keras.layers.Conv2D(1, kernel_size=(4,3), strides=(2,1), padding='valid',
-                                                kernel_regularizer=kernel_regularizer)  # Output: patch map
+        
+        self.conv1 = tf.keras.layers.Conv2D(filters[0], kernel_size=(4,3), strides=(2,1), padding='valid',
+                                            kernel_regularizer=kernel_regularizer)
+        self.conv2 = tf.keras.layers.Conv2D(filters[1], kernel_size=(3,3), strides=(2,1), padding='valid',
+                                            kernel_regularizer=kernel_regularizer)
+        self.norm2 = InstanceNormalization()
+        self.conv3 = tf.keras.layers.Conv2D(filters[2], kernel_size=(4,3), strides=(2,1), padding='valid',
+                                            kernel_regularizer=kernel_regularizer)
+        self.norm3 = InstanceNormalization()
+        self.conv4 = tf.keras.layers.Conv2D(filters[3], kernel_size=(3,3), strides=(2,1), padding='valid',
+                                            kernel_regularizer=kernel_regularizer)
+        self.norm4 = InstanceNormalization()
+        self.last = tf.keras.layers.Conv2D(1, kernel_size=(3,3), strides=(2,1), padding='valid',
+                                            kernel_regularizer=kernel_regularizer)  # Output: patch map
 
     def call(self, x, training=False):
         x = tf.nn.leaky_relu(self.conv1(x), alpha=0.2)  # (batch, 395, 12, C_out)
@@ -191,18 +194,15 @@ class GAN_Output:
         self.extracted_features = extracted_features  # Extracted features
         
 class GAN(tf.keras.Model):
-    def __init__(self, n_subc=792, generator=Pix2PixGenerator, discriminator=PatchGANDiscriminator, gen_l2=None, disc_l2=None):
+    def __init__(self, n_subc=132, generator=Pix2PixGenerator, discriminator=PatchGANDiscriminator, gen_l2=None, disc_l2=None):
         super().__init__()
         self.generator = generator(n_subc=n_subc, gen_l2=gen_l2)
         self.discriminator = discriminator(n_subc=n_subc, disc_l2=disc_l2)
 
     def call(self, inputs, training=False):
         # Optionally implement a forward pass if needed
-        if isinstance(inputs, tuple):
-            x, cond = inputs
-        else:
-            x, cond = inputs, None
-        gen_out, features = self.generator(x, cond, training=training)
+        x = inputs
+        gen_out, features = self.generator(x, training=training)
         disc_out = self.discriminator(gen_out, training=training)
         return GAN_Output(
             gen_out=gen_out,
@@ -217,19 +217,21 @@ class DomainDisc(tf.keras.Model):
     def __init__(self, l2_reg=None):
         super().__init__()
         kernel_regularizer = tf.keras.regularizers.l2(l2_reg) if l2_reg is not None else None
-        self.conv1 = tf.keras.layers.Conv2D(256, kernel_size=(4,3), strides=(2,1), padding='valid', 
+        self.conv1 = tf.keras.layers.Conv2D(256, kernel_size=(3,2), strides=(2,1), padding='valid', 
                                             activation='relu', kernel_regularizer=kernel_regularizer)
-        self.conv2 = tf.keras.layers.Conv2D(128, kernel_size=(3,2), strides=(2,1), padding='valid', 
+        self.conv2 = tf.keras.layers.Conv2D(128, kernel_size=(2,2), strides=(2,1), padding='valid', 
                                             activation='relu', kernel_regularizer=kernel_regularizer)
-        self.conv3 = tf.keras.layers.Conv2D(64, kernel_size=(3,2), strides=(2,1), padding='valid', 
+        self.conv3 = tf.keras.layers.Conv2D(64, kernel_size=(2,2), strides=(1,1), padding='valid', 
                                             activation='relu', kernel_regularizer=kernel_regularizer)
         self.pool = tf.keras.layers.GlobalAveragePooling2D()
         self.fc1 = tf.keras.layers.Dense(64, activation='relu')
         self.out = tf.keras.layers.Dense(1, activation='sigmoid')
     def call(self, x):
-        x = self.conv1(x)  # (batch, 23, 4, 256)
-        x = self.conv2(x)  # (batch, 11, 3, 128)
-        x = self.conv3(x)  # (batch, 5, 2, 64)
+        x = self.conv1(x)  # (batch, 4, 13, 256)
+        x = reflect_padding_2d(x, pad_h=1, pad_w=0)  # symmetric padding
+        x = self.conv2(x)  # (batch, 3, 12, 128)
+        x = reflect_padding_2d(x, pad_h=1, pad_w=0)  # symmetric padding
+        x = self.conv3(x)  # (batch, 2, 11, 64)
         x = self.pool(x)   # (batch, 64)
         x = self.fc1(x)    # (batch, 64)
         return self.out(x) # (batch, 1) - domain probability
@@ -297,7 +299,7 @@ def train_step_gan(model, domain_model, loader_H, loss_fn, optimizers, lower_ran
 
         # === 1. Train Discriminator ===
         with tf.GradientTape() as tape_d:
-            x_fake_src = model.generator(x_scaled_src, cond=None, training=True)[0] 
+            x_fake_src = model.generator(x_scaled_src, training=True)[0] 
                 # x_fake == generated data gen(x_real)
                 # x_fake ~= y (y is real)
             d_real = model.discriminator(y_scaled_src, training=True)
@@ -472,7 +474,7 @@ def val_step(model, domain_model, loader_H, loss_fn, lower_range, nsymb=14, adv_
         y_scaled_tgt, _, _ = utils.minmaxScaler(y_tgt_real, lower_range=lower_range)
 
         # === Source domain prediction ===
-        preds_src, features_src = model.generator(x_scaled_src, cond=None, training=False)
+        preds_src, features_src = model.generator(x_scaled_src, training=False)
         preds_src = preds_src.numpy() if hasattr(preds_src, 'numpy') else preds_src
         preds_src_descaled = utils.deMinMax(preds_src, x_min_src, x_max_src, lower_range=lower_range)
         batch_est_loss_source = loss_fn_est(y_scaled_src, preds_src).numpy()
@@ -482,7 +484,7 @@ def val_step(model, domain_model, loader_H, loss_fn, lower_range, nsymb=14, adv_
         epoc_nmse_val_source += np.mean(mse_val_source / (power_source + 1e-30)) * x_src.shape[0]
 
         # === Target domain prediction ===
-        preds_tgt, features_tgt = model.generator(x_scaled_tgt, cond=None, training=False)
+        preds_tgt, features_tgt = model.generator(x_scaled_tgt, training=False)
         preds_tgt = preds_tgt.numpy() if hasattr(preds_tgt, 'numpy') else preds_tgt
         preds_tgt_descaled = utils.deMinMax(preds_tgt, x_min_tgt, x_max_tgt, lower_range=lower_range)
         batch_est_loss_target = loss_fn_est(y_scaled_tgt, preds_tgt).numpy()
@@ -660,7 +662,7 @@ def train_step_wgan_gp(model, domain_model, loader_H, loss_fn, optimizers, lower
         # === 1. Train Discriminator ===
         # Only considering source domain
         with tf.GradientTape() as tape_d:
-            x_fake_src = model.generator(x_scaled_src, cond=None, training=True)[0]
+            x_fake_src = model.generator(x_scaled_src, training=True)[0]
             d_real = model.discriminator(y_scaled_src, training=True)
             d_fake = model.discriminator(x_fake_src, training=True)
             
@@ -843,7 +845,7 @@ def val_step_wgan_gp(model, domain_model, loader_H, loss_fn, lower_range, nsymb=
         y_scaled_tgt, _, _ = utils.minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
 
         # === Source domain prediction ===
-        preds_src, features_src = model.generator(x_scaled_src, cond=None, training=False)
+        preds_src, features_src = model.generator(x_scaled_src, training=False)
         preds_src = preds_src.numpy() if hasattr(preds_src, 'numpy') else preds_src
         preds_src_descaled = utils.deMinMax(preds_src, x_min_src, x_max_src, lower_range=lower_range)
         batch_est_loss_source = loss_fn_est(y_scaled_src, preds_src).numpy()
@@ -853,7 +855,7 @@ def val_step_wgan_gp(model, domain_model, loader_H, loss_fn, lower_range, nsymb=
         epoc_nmse_val_source += np.mean(mse_val_source / (power_source + 1e-30)) * x_src.shape[0]
 
         # === Target domain prediction ===
-        preds_tgt, features_tgt = model.generator(x_scaled_tgt, cond=None, training=False)
+        preds_tgt, features_tgt = model.generator(x_scaled_tgt, training=False)
         preds_tgt = preds_tgt.numpy() if hasattr(preds_tgt, 'numpy') else preds_tgt
         preds_tgt_descaled = utils.deMinMax(preds_tgt, x_min_tgt, x_max_tgt, lower_range=lower_range)
         batch_est_loss_target = loss_fn_est(y_scaled_tgt, preds_tgt).numpy()
