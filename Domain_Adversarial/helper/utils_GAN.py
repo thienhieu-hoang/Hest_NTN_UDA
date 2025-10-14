@@ -721,8 +721,8 @@ def train_step_wgan_gp(model, domain_model, loader_H, loss_fn, optimizers, lower
         # === 3. Train Domain Discriminator ===
         if domain_weight != 0:
             with tf.GradientTape() as tape_domain:
-                _, features_src = model.generator(x_scaled_src, None, training=False)
-                _, features_tgt = model.generator(x_scaled_tgt, None, training=False)
+                _, features_src = model.generator(x_scaled_src, training=False)
+                _, features_tgt = model.generator(x_scaled_tgt, training=False)
 
                 domain_labels_src = tf.ones((features_src.shape[0], 1))
                 domain_labels_tgt = tf.zeros((features_tgt.shape[0], 1))
@@ -1034,7 +1034,8 @@ def post_val(epoc_val_return, epoch, n_epochs, val_est_loss, val_est_loss_source
 
 def save_checkpoint(model, save_model, model_path, sub_folder, epoch, figLoss, savemat, train_loss, train_est_loss, train_domain_loss, train_est_loss_target,
                     val_est_loss, val_est_loss_source, val_loss, val_est_loss_target, val_gan_disc_loss, val_domain_disc_loss,
-                    source_acc, target_acc, acc, nmse_val_source, nmse_val_target, nmse_val, pad_observe, epoc_pad, train_disc_loss=None, domain_weight=True, optimizer=None, domain_model=None):
+                    source_acc, target_acc, acc, nmse_val_source, nmse_val_target, nmse_val, pad_pca_svm, pad_pca_lda, pad_pca_logreg, epoc_pad, pad_svm, 
+                    train_disc_loss=None, domain_weight=True, optimizer=None, domain_model=None):
     # Save model
     os.makedirs(f"{model_path}/{sub_folder}/model/", exist_ok=True)
     if save_model:
@@ -1097,9 +1098,12 @@ def save_checkpoint(model, save_model, model_path, sub_folder, epoch, figLoss, s
     perform_to_save['nmse_val_target'] = nmse_val_target
     perform_to_save['nmse_val'] = nmse_val
     #
-    perform_to_save['pad_observe'] = pad_observe
+    perform_to_save['pad_pca_svm'] = pad_pca_svm
+    perform_to_save['pad_pca_lda'] = pad_pca_lda
+    perform_to_save['pad_pca_logreg'] = pad_pca_logreg
     perform_to_save['epoc_pad'] = epoc_pad
-    
+    perform_to_save['pad_svm'] = pad_svm
+
     # save
     os.makedirs(f"{model_path}/{sub_folder}/performance/", exist_ok=True)
     savemat(model_path + '/' + sub_folder + '/performance/performance.mat', perform_to_save)

@@ -540,16 +540,57 @@ def cal_PAD2(features_source_h5, features_target_h5, num_samples=2048, pca_compo
 def extract_features_with_pca(features_source_h5, features_target_h5, 
                             num_samples=2048, pca_components=100, batch_size=128):
     """
-    Load features from .h5 files batch by batch, fit IncrementalPCA, 
-    return reduced features X and domain labels y.
+    if features_source_h5 is a string, it is a path to .h5 file
+        Load features from .h5 files batch by batch, fit IncrementalPCA, 
+        return reduced features X and domain labels y.
     """
-    print(f"Fitting IncrementalPCA on batches from {features_source_h5} and {features_target_h5}")
-    
-    # Open both files
-    with h5py.File(features_source_h5, 'r') as f_source, h5py.File(features_target_h5, 'r') as f_target:
-        dset_source = f_source['features']
-        dset_target = f_target['features']
+    if isinstance(features_source_h5, str) and isinstance(features_target_h5, str):
+        print(f"Fitting IncrementalPCA on batches from {features_source_h5} and {features_target_h5}")
+        
+        # Open both files
+        with h5py.File(features_source_h5, 'r') as f_source, h5py.File(features_target_h5, 'r') as f_target:
+            dset_source = f_source['features']
+            dset_target = f_target['features']
 
+            n_source = min(dset_source.shape[0], num_samples) if num_samples else dset_source.shape[0]
+            n_target = min(dset_target.shape[0], num_samples) if num_samples else dset_target.shape[0]
+
+            # Initialize IncrementalPCA
+            ipca = IncrementalPCA(n_components=pca_components, batch_size=batch_size)
+
+            # First pass: partial_fit
+            idx_source = idx_target = 0
+            while idx_source < n_source or idx_target < n_target:
+                batch_source = dset_source[idx_source:min(idx_source+batch_size, n_source)]
+                batch_target = dset_target[idx_target:min(idx_target+batch_size, n_target)]
+                batch = np.concatenate([batch_source, batch_target], axis=0).reshape(-1, np.prod(dset_source.shape[1:]))
+                ipca.partial_fit(batch)
+                idx_source += batch_size
+                idx_target += batch_size
+                print(f"Fitted PCA on batch: source {min(idx_source, n_source)}/{n_source}, target {min(idx_target, n_target)}/{n_target}")
+
+            # Second pass: transform and collect reduced features
+            reduced_source, reduced_target = [], []
+
+            for idx in range(0, n_source, batch_size):
+                batch = dset_source[idx:min(idx+batch_size, n_source)].reshape(-1, np.prod(dset_source.shape[1:]))
+                reduced_source.append(ipca.transform(batch))
+
+            for idx in range(0, n_target, batch_size):
+                batch = dset_target[idx:min(idx+batch_size, n_target)].reshape(-1, np.prod(dset_target.shape[1:]))
+                reduced_target.append(ipca.transform(batch))
+
+            X_source = np.vstack(reduced_source)
+            X_target = np.vstack(reduced_target)
+            print(f"Reduced source shape: {X_source.shape}, target shape: {X_target.shape}")
+    else:
+        H_input_train_source_numpy = h5loader_to_numpy_v2(features_source_h5)
+        H_input_train_target_numpy = h5loader_to_numpy_v2(features_target_h5)
+
+        H_input_train_source_real = complex_to_real_stack(H_input_train_source_numpy)
+        H_input_train_target_real = complex_to_real_stack(H_input_train_target_numpy)
+        dset_source = H_input_train_source_real
+        dset_target = H_input_train_target_real
         n_source = min(dset_source.shape[0], num_samples) if num_samples else dset_source.shape[0]
         n_target = min(dset_target.shape[0], num_samples) if num_samples else dset_target.shape[0]
 
@@ -581,7 +622,6 @@ def extract_features_with_pca(features_source_h5, features_target_h5,
         X_source = np.vstack(reduced_source)
         X_target = np.vstack(reduced_target)
         print(f"Reduced source shape: {X_source.shape}, target shape: {X_target.shape}")
-
     # Stack and label
     X = np.vstack((X_source, X_target))
     y = np.concatenate((np.zeros(X_source.shape[0]), np.ones(X_target.shape[0])))
@@ -614,6 +654,9 @@ def calc_pad_svm(X, y):
             best_C = C
 
     print(f"Best C: {best_C}, Best error rate: {best_epsilon:.4f}")
+    if best_epsilon>0.5: 
+        print(f"Flip the predictions")
+        best_epsilon = 1- best_epsilon
 
     # Compute PAD
     pad = 2 * (1 - 2 * best_epsilon)
@@ -637,6 +680,9 @@ def calc_pad_lda(X, y):
     error_rate = 1 - accuracy
 
     print(f"LDA Error rate: {error_rate:.4f}")
+    if error_rate>0.5: 
+        print(f"Flip the predictions")
+        error_rate = 1- error_rate
 
     # Compute PAD
     pad = 2 * (1 - 2 * error_rate)
@@ -662,9 +708,58 @@ def calc_pad_logreg(X, y):
     error_rate = 1 - accuracy
 
     print(f"Logistic Regression Error rate: {error_rate:.4f}")
+    if error_rate>0.5: 
+        print(f"Flip the predictions")
+        error_rate = 1- error_rate
 
     # Compute PAD
     pad = 2 * (1 - 2 * error_rate)
     print(f"============ PAD (LogReg) = {pad:.4f}")
 
     return pad
+
+def h5loader_to_numpy_v2(loader):
+    loader.reset()  # Reset to start from beginning
+    all_data = []
+    
+    # Try different possible method names
+    if hasattr(loader, 'get_batch'):
+        # Original approach
+        for batch_idx in range(loader.total_batches):
+            batch_data = loader.get_batch()
+            all_data.append(batch_data)
+    elif hasattr(loader, 'next_batch'):
+        # Alternative method name
+        for batch_idx in range(loader.total_batches):
+            batch_data = loader.next_batch()
+            all_data.append(batch_data)
+    elif hasattr(loader, '__next__'):
+        # Iterator approach
+        for batch_idx in range(loader.total_batches):
+            batch_data = next(loader)
+            all_data.append(batch_data)
+    elif hasattr(loader, 'get_data'):
+        # Another possible method name
+        for batch_idx in range(loader.total_batches):
+            batch_data = loader.get_data()
+            all_data.append(batch_data)
+    else:
+        # Direct data access if available
+        if hasattr(loader, 'dataset') and hasattr(loader, 'shuffled_indices'):
+            return loader.dataset[loader.shuffled_indices]
+    
+    # Concatenate all batches
+    return np.concatenate(all_data, axis=0)
+
+def complex_to_real_stack(complex_array):
+    """Convert complex array to real array by stacking real and imaginary parts"""
+    if complex_array.dtype.names:  # Structured array
+        real_part = complex_array['real']
+        imag_part = complex_array['imag']
+    else:  # Regular complex array
+        real_part = np.real(complex_array)
+        imag_part = np.imag(complex_array)
+    
+    # Stack along the last dimension: (..., 2) where [..., 0] = real, [..., 1] = imag
+    # Ensure the result is float64
+    return np.stack([real_part, imag_part], axis=-1).astype(np.float64)

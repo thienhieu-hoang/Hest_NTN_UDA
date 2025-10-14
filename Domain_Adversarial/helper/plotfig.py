@@ -1,6 +1,8 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import PAD
+import utils
 
 def figLoss(line_list=None, index_save=1, figure_save_path=None, fig_show=False, 
             fig_name=None, xlabel='Epoch', ylabel='Loss', title='Training and Validation Loss'):
@@ -87,10 +89,19 @@ def figPredChan(x, title, y, index_save, figure_save_path, name):
     # plt.show()
     plt.clf()
 
-def plotHist(X, fig_show=False, save_path=None, name=None):
+def plotHist(X, fig_show=True, save_path=None, name=None, percent=100):
     # to use:
         # plotHist(H_true_source, fig_show=True, save_path=f'{notebook_dir}/../generatedChan/', name='source')
     #
+    import h5py
+    if isinstance(X, str) and X.endswith('.h5'):   
+        with h5py.File(X, 'r') as f_file:
+            X = np.array(f_file['features'])
+            
+    if isinstance(X, utils.H5BatchLoader):
+        X_ = PAD.h5loader_to_numpy_v2(X)
+        X = PAD.complex_to_real_stack(X_)
+    
     if not isinstance(X, np.ndarray):
             X = np.array(X)
 
@@ -102,33 +113,49 @@ def plotHist(X, fig_show=False, save_path=None, name=None):
     # Compute magnitude and phase
     magnitudes = np.abs(X_flat)
     phases = np.angle(X_flat)  # in radians, range [-π, π]
+    
+    # Compute percentile limits
+    high = np.percentile(magnitudes, percent)  # keep % of data
+
+    # Clip the data to this range (optional)
+    magnitudes_clipped = magnitudes[magnitudes <= high]
 
     # --- Plot magnitude histogram ---
     plt.figure(figsize=(10, 4))
-    plt.hist(magnitudes, bins=400, color='blue', alpha=0.7)
-    plt.title('Distribution of Magnitudes')
+    counts, bins, patches = plt.hist(magnitudes_clipped, bins=400, color='blue', alpha=0.7)
+    # plt.autoscale(enable=True, axis='y', tight=True)
+    plt.ylim(0, counts.max() * 1.05)
+    # Find bins that actually have counts
+    # nonempty = counts > 0
+    # xmin = bins[np.argmax(nonempty)]        # first non-empty bin
+    # xmax = bins[len(nonempty) - np.argmax(nonempty[::-1])]  # last non-empty bin
+
+    # # plt.xlim(xmin, xmax)
+    # plt.title('Distribution of Magnitudes')
     plt.xlabel('Magnitude')
     plt.ylabel('Count')
     plt.grid(True)
     if save_path is not None:
-        plt.savefig(save_path + f'magnitude_{name}.svg')
+        os.makedirs(save_path, exist_ok=True)
+        plt.savefig(save_path + f'magnitude_{name}_{percent}.svg')
     if fig_show:
         plt.show()
     plt.clf()
 
     # --- Plot phase histogram ---
-    plt.figure(figsize=(10, 4))
-    plt.hist(phases, bins=400, color='orange', alpha=0.7)
-    plt.title('Distribution of Phases')
-    plt.xlabel('Phase (radians)')
-    plt.ylabel('Count')
-    plt.grid(True)
-    if save_path is not None:
-        plt.savefig(save_path + f'phase_{name}.svg')
-    if fig_show:
-        plt.show()
-    plt.clf()
-    
+    if np.iscomplexobj(X_flat):
+        plt.figure(figsize=(10, 4))
+        plt.hist(phases, bins=400, color='orange', alpha=0.7)
+        # plt.title('Distribution of Phases')
+        plt.xlabel('Phase (radians)')
+        plt.ylabel('Count')
+        plt.grid(True)
+        if save_path is not None:
+            plt.savefig(save_path + f'phase_{name}.svg')
+        if fig_show:
+            plt.show()
+        plt.clf()
+        
 from scipy.stats import wasserstein_distance
 
 def wasserstein_magnitude_only(X1, X2):
@@ -136,6 +163,14 @@ def wasserstein_magnitude_only(X1, X2):
     Compute Wasserstein-1 distance between the magnitude distributions
     of two complex-valued datasets.
     """
+    if isinstance(X1, utils.H5BatchLoader): 
+        X_ = PAD.h5loader_to_numpy_v2(X1)
+        X1 = PAD.complex_to_real_stack(X_)
+    if isinstance(X2, utils.H5BatchLoader):
+        X_ = PAD.h5loader_to_numpy_v2(X2)
+        X2 = PAD.complex_to_real_stack(X_)
+    # now consider the real and imag parts as 2 parts, not complex elements
+        
     # Convert to numpy arrays
     if not isinstance(X1, np.ndarray):
         X1 = np.array(X1)
@@ -165,6 +200,19 @@ def wasserstein_approximate(X1, X2, reg=1e-2, n_samples=10000):
     - n_samples: number of random samples for computational efficiency
     """
     import ot  # POT = Python Optimal Transport
+    import h5py
+
+    if isinstance(X1, str) and X1.endswith('.h5'):   
+        with h5py.File(X1, 'r') as f_source, h5py.File(X2, 'r') as f_target:
+            X1 = np.array(f_source['features'])
+            X2 = np.array(f_target['features'])
+
+    if isinstance(X1, utils.H5BatchLoader):
+        X_ = PAD.h5loader_to_numpy_v2(X1)
+        X1 = PAD.complex_to_real_stack(X_)
+    if isinstance(X2, utils.H5BatchLoader):
+        X_ = PAD.h5loader_to_numpy_v2(X2)
+        X2 = PAD.complex_to_real_stack(X_)
 
     # Convert to numpy arrays
     if not isinstance(X1, np.ndarray):
