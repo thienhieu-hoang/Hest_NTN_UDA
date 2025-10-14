@@ -32,7 +32,6 @@ import loader
 import plotfig
 
 
-
 SNR = 0
 source_data_file_path_label = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'OpenNTN','H_perfect.mat'))
 source_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'OpenNTN', f'SNR_{SNR}dB','sionnaNTN.mat'))
@@ -61,10 +60,11 @@ if CNN_DropOut != 0:
     dropOut_txt = f'Add p={CNN_DropOut} DropOut'
     
 # Paths to save
-idx_save_path = loader.find_incremental_filename(notebook_dir + '/model/GAN_calcu','ver', '_', '')
+path_temp = os.makedirs(os.path.dirname(notebook_dir + f'/model/GAN_calcu/{SNR}_dB'), exist_ok=True)
+idx_save_path = loader.find_incremental_filename(path_temp,'ver', '_', '')
 
 save_model = True
-model_path = notebook_dir + '/model/GA_calcu/ver' + str(idx_save_path) + '_'
+model_path = notebook_dir + f'/model/GAN_calcu/{SNR}_dB/ver' + str(idx_save_path) + '_'
 # figure_path = notebook_dir + '/model/GAN/ver' + str(idx_save_path) + '_/figure'
 model_readme = model_path + '/readme.txt'
 
@@ -149,12 +149,12 @@ loss_fn_ce = tf.keras.losses.MeanSquaredError()  # Channel estimation loss (gene
 loss_fn_bce = tf.keras.losses.BinaryCrossentropy(from_logits=False) # Binary cross-entropy loss for discriminator
 loss_fn_domain = tf.keras.losses.BinaryCrossentropy()  # Domain classification loss
 
-load_checkpoint = True  # True if continue training
+load_checkpoint = False  # True if continue training
 if load_checkpoint:
     # model_path = notebook_dir + '/model/GAN_calcu/ver' + str(idx_save_path-1) + '_' # or replace idx_save_path-1 by the desired folder index
-    model_path = notebook_dir + '/model/GAN_calcu/ver' + str(idx_save_path-1) + '_'
+    model_path = notebook_dir + f'/model/GAN_calcu/{SNR}_dB/ver' + str(idx_save_path-1) + '_'
 else:
-    model_path = notebook_dir + '/model/GAN_calcu/ver' + str(idx_save_path) + '_'
+    model_path = notebook_dir + f'/model/GAN_calcu/{SNR}_dB/ver' + str(idx_save_path) + '_'
 if load_checkpoint:
     start_epoch = 1  # This is the epoch we want to CONTINUE FROM (not load from)
 else:
