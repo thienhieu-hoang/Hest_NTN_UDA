@@ -3,6 +3,16 @@ import tensorflow as tf
 import os
 import sys
 import numpy as np
+
+import scipy
+print(f"scipy version: {scipy.__version__}")
+
+# import subprocess
+# subprocess.check_call([sys.executable, "-m", "pip", "install", "POT"])
+
+import ot
+print(f"POT version: {ot.__version__}")
+
 from scipy.io import savemat, loadmat
 from sklearn.linear_model import SGDClassifier
 
@@ -20,6 +30,8 @@ notebook_dir = script_dir
 import utils
 import loader
 import plotfig
+
+
 
 SNR = 0
 source_data_file_path_label = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'OpenNTN','H_perfect.mat'))
@@ -49,10 +61,10 @@ if CNN_DropOut != 0:
     dropOut_txt = f'Add p={CNN_DropOut} DropOut'
     
 # Paths to save
-idx_save_path = loader.find_incremental_filename(notebook_dir + '/model/GAN','ver', '_', '')
+idx_save_path = loader.find_incremental_filename(notebook_dir + '/model/GAN_calcu','ver', '_', '')
 
 save_model = True
-model_path = notebook_dir + '/model/GAN/ver' + str(idx_save_path) + '_'
+model_path = notebook_dir + '/model/GA_calcu/ver' + str(idx_save_path) + '_'
 # figure_path = notebook_dir + '/model/GAN/ver' + str(idx_save_path) + '_/figure'
 model_readme = model_path + '/readme.txt'
 
@@ -140,7 +152,7 @@ loss_fn_domain = tf.keras.losses.BinaryCrossentropy()  # Domain classification l
 load_checkpoint = True  # True if continue training
 if load_checkpoint:
     # model_path = notebook_dir + '/model/GAN_calcu/ver' + str(idx_save_path-1) + '_' # or replace idx_save_path-1 by the desired folder index
-    model_path = notebook_dir + '/model/GAN/ver' + str(idx_save_path-1) + '_'
+    model_path = notebook_dir + '/model/GAN_calcu/ver' + str(idx_save_path-1) + '_'
 else:
     model_path = notebook_dir + '/model/GAN_calcu/ver' + str(idx_save_path) + '_'
 if load_checkpoint:
