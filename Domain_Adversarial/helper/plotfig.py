@@ -32,6 +32,7 @@ def figLoss(line_list=None, index_save=1, figure_save_path=None, fig_show=False,
         os.makedirs(figure_save_path, exist_ok=True)
         save_path = os.path.join(figure_save_path, f"{index_save}{fig_name}")
         plt.savefig(save_path)
+        plt.savefig(f'{save_path}.svg')
     
     if fig_show:
         plt.show()
@@ -65,6 +66,7 @@ def figChan(x, nmse =None, title=None, index_save=1, figure_save_path=None, name
     if figure_save_path is not None:
         os.makedirs(figure_save_path, exist_ok=True)
         plt.savefig(os.path.join(figure_save_path, 'epoch_' + str(index_save) + name), bbox_inches='tight')
+        plt.savefig(f'{figure_save_path}/epoch_{index_save}{name}.svg', bbox_inches='tight')
     plt.clf()
     
 def figTrueChan(x, title, index_save, figure_save_path, name):
@@ -75,6 +77,7 @@ def figTrueChan(x, title, index_save, figure_save_path, name):
     plt.title(title)
     plt.colorbar()
     plt.savefig(os.path.join(figure_save_path,  str(index_save) + name) )
+    plt.savefig(f'{figure_save_path}/{index_save}{name}.svg', bbox_inches='tight')
     plt.clf()
     
 def figPredChan(x, title, y, index_save, figure_save_path, name):
@@ -86,6 +89,7 @@ def figPredChan(x, title, y, index_save, figure_save_path, name):
     plt.title(f'{title}, NMSE: {y:.4f}')
     plt.colorbar()
     plt.savefig(os.path.join(figure_save_path,  str(index_save) + name) )
+    plt.savefig(f'{figure_save_path}/{index_save}{name}.svg', bbox_inches='tight')
     # plt.show()
     plt.clf()
 
