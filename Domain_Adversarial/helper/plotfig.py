@@ -5,7 +5,7 @@ import PAD
 import utils
 
 def figLoss(line_list=None, index_save=1, figure_save_path=None, fig_show=False, 
-            fig_name=None, xlabel='Epoch', ylabel='Loss', title='Training and Validation Loss'):
+            fig_name=None, xlabel='Epoch', ylabel='Loss', title='Training and Validation Loss', x=None):
     """
     loss_list: List of tuples/lists [(loss_values1, 'Legend1'), (loss_values2, 'Legend2'), ...]
     """
@@ -14,9 +14,13 @@ def figLoss(line_list=None, index_save=1, figure_save_path=None, fig_show=False,
     if line_list is not None:
         max_len = 0
         for loss_values, legend_name in line_list:
-            x = range(0, len(loss_values) + 0)
-            plt.plot(x, loss_values, label=legend_name)
-            max_len = max(max_len, len(loss_values))
+            if x.all is not None:
+                plt.plot(x, loss_values, label=legend_name)
+                max_len = max(max_len, len(loss_values))
+            else:
+                x = range(0, len(loss_values) + 0)
+                plt.plot(x, loss_values, label=legend_name)
+                max_len = max(max_len, len(loss_values))
 
         plt.xlabel(xlabel)
         plt.ylabel(ylabel)
@@ -142,6 +146,7 @@ def plotHist(X, fig_show=True, save_path=None, name=None, percent=100):
     if save_path is not None:
         os.makedirs(save_path, exist_ok=True)
         plt.savefig(save_path + f'magnitude_{name}_{percent}.svg')
+        plt.close()
     if fig_show:
         plt.show()
     plt.clf()
@@ -156,6 +161,7 @@ def plotHist(X, fig_show=True, save_path=None, name=None, percent=100):
         plt.grid(True)
         if save_path is not None:
             plt.savefig(save_path + f'phase_{name}.svg')
+            plt.close()
         if fig_show:
             plt.show()
         plt.clf()
