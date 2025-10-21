@@ -4,7 +4,7 @@ import h5py
 import os
 # from torch.utils.data import DataLoader, TensorDataset, RandomSampler
 
-import utils
+from . import utils
 # import utils_GAN
 
 
