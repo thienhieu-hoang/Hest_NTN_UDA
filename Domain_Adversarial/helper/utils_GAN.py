@@ -11,7 +11,7 @@ import sys
 import os 
 
 from dataclasses import dataclass
-import utils
+from . import utils
 
 
 @dataclass

@@ -1,8 +1,11 @@
 import os
 import numpy as np
+import scipy.io as sio
 import matplotlib.pyplot as plt
-import PAD
-import utils
+
+from Domain_Adversarial.helper import data
+from . import PAD
+from . import utils
 
 def figLoss(line_list=None, index_save=1, figure_save_path=None, fig_show=False, 
             fig_name=None, xlabel='Epoch', ylabel='Loss', title='Training and Validation Loss', x=None):
@@ -10,7 +13,7 @@ def figLoss(line_list=None, index_save=1, figure_save_path=None, fig_show=False,
     loss_list: List of tuples/lists [(loss_values1, 'Legend1'), (loss_values2, 'Legend2'), ...]
     """
     plt.figure(figsize=(10, 5))
-    
+    line_data = []
     if line_list is not None:
         max_len = 0
         for loss_values, legend_name in line_list:
@@ -21,6 +24,10 @@ def figLoss(line_list=None, index_save=1, figure_save_path=None, fig_show=False,
                 x = range(0, len(loss_values) + 0)
                 plt.plot(x, loss_values, label=legend_name)
                 max_len = max(max_len, len(loss_values))
+            line_data.append({
+                'legend': legend_name,
+                'values': loss_values
+            })
 
         plt.xlabel(xlabel)
         plt.ylabel(ylabel)
@@ -37,6 +44,7 @@ def figLoss(line_list=None, index_save=1, figure_save_path=None, fig_show=False,
         save_path = os.path.join(figure_save_path, f"{index_save}{fig_name}")
         plt.savefig(save_path)
         plt.savefig(f'{save_path}.svg')
+        sio.savemat(f'{save_path}.mat', {'line_list': line_data})
     
     if fig_show:
         plt.show()
@@ -165,6 +173,14 @@ def plotHist(X, fig_show=True, save_path=None, name=None, percent=100):
         if fig_show:
             plt.show()
         plt.clf()
+    data = {
+        'results': {
+            'phases': phases,
+            'magnitudes_clipped': magnitudes_clipped,
+            'counts': counts
+        }
+    }   
+    sio.savemat(save_path + f'{name}.mat', data)
         
 from scipy.stats import wasserstein_distance
 
