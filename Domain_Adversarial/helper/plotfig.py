@@ -17,7 +17,7 @@ def figLoss(line_list=None, index_save=1, figure_save_path=None, fig_show=False,
     if line_list is not None:
         max_len = 0
         for loss_values, legend_name in line_list:
-            if x.all is not None:
+            if (x is not None):
                 plt.plot(x, loss_values, label=legend_name)
                 max_len = max(max_len, len(loss_values))
             else:
@@ -44,10 +44,13 @@ def figLoss(line_list=None, index_save=1, figure_save_path=None, fig_show=False,
         save_path = os.path.join(figure_save_path, f"{index_save}{fig_name}")
         plt.savefig(save_path)
         plt.savefig(f'{save_path}.svg')
-        sio.savemat(f'{save_path}.mat', {'line_list': line_data})
+        # sio.savemat(f'{save_path}.mat', {'line_list': line_data})
     
     if fig_show:
         plt.show()
+        
+    if figure_save_path is not None:
+        plt.close()
     
     plt.clf()
     
@@ -79,6 +82,7 @@ def figChan(x, nmse =None, title=None, index_save=1, figure_save_path=None, name
         os.makedirs(figure_save_path, exist_ok=True)
         plt.savefig(os.path.join(figure_save_path, 'epoch_' + str(index_save) + name), bbox_inches='tight')
         plt.savefig(f'{figure_save_path}/epoch_{index_save}{name}.svg', bbox_inches='tight')
+        plt.close()
     plt.clf()
     
 def figTrueChan(x, title, index_save, figure_save_path, name):
@@ -154,10 +158,9 @@ def plotHist(X, fig_show=True, save_path=None, name=None, percent=100):
     if save_path is not None:
         os.makedirs(save_path, exist_ok=True)
         plt.savefig(save_path + f'magnitude_{name}_{percent}.svg')
-        plt.close()
     if fig_show:
         plt.show()
-    plt.clf()
+
 
     # --- Plot phase histogram ---
     if np.iscomplexobj(X_flat):
@@ -169,10 +172,12 @@ def plotHist(X, fig_show=True, save_path=None, name=None, percent=100):
         plt.grid(True)
         if save_path is not None:
             plt.savefig(save_path + f'phase_{name}.svg')
-            plt.close()
         if fig_show:
             plt.show()
-        plt.clf()
+            
+    if save_path is not None:
+        plt.close()
+    plt.clf()
     data = {
         'results': {
             'phases': phases,

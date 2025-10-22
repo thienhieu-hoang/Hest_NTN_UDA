@@ -11,7 +11,7 @@ import sys
 import os 
 
 from dataclasses import dataclass
-from . import utils
+import utils
 
 
 @dataclass
@@ -1125,110 +1125,6 @@ def save_checkpoint(model, save_model, model_path, sub_folder, epoch, figLoss, s
         # estimation loss: MSE loss, before de-scale
     figLoss(line_list=[(train_domain_loss, 'Training'), (val_domain_disc_loss, 'Validating')], xlabel='Epoch', ylabel='Domain Discrimination Loss',
                 title='Training and Validating Domain Discrimination Loss', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Loss_domain')
-
-def save_checkpoint_(model, save_model, model_path, sub_folder, epoch, metrics):
-    figLoss = metrics['figLoss']; savemat = metrics['savemat']; 
-    train_loss = metrics['train_loss']; train_est_loss = metrics['train_est_loss']
-    train_domain_loss = metrics['train_domain_loss']; train_est_loss_target = metrics['train_est_loss_target']; 
-    val_est_loss = metrics['val_est_loss']; val_est_loss_source = metrics['val_est_loss_source']; 
-    val_loss = metrics['val_loss']; val_est_loss_target = metrics['val_est_loss_target']
-    val_gan_disc_loss = metrics['val_gan_disc_loss']; val_domain_disc_loss = metrics['val_domain_disc_loss']; source_acc = metrics['source_acc']
-    target_acc = metrics['target_acc']; acc = metrics['acc']; 
-    nmse_val_source = metrics['nmse_val_source']; nmse_val_target = metrics['nmse_val_target']
-    nmse_val = metrics['nmse_val']; 
-    pad_pca_svm = metrics['pad_pca_svm']; pad_pca_lda = metrics['pad_pca_lda']; pad_pca_logreg = metrics['pad_pca_logreg']
-    epoc_pad = metrics['epoc_pad']; pad_svm = metrics['pad_svm']; train_disc_loss = metrics['train_disc_loss']; 
-    domain_weight = metrics['domain_weight']; optimizer = metrics['optimizer']
-
-    # Save model
-    os.makedirs(f"{model_path}/{sub_folder}/model/", exist_ok=True)
-    if save_model:
-        # Create checkpoint with all model components and optimizers
-        gen_optimizer, disc_optimizer, domain_optimizer = optimizer
-        
-        # Create checkpoint object
-        ckpt = tf.train.Checkpoint(
-            generator=model.generator,
-            discriminator=model.discriminator,
-            gen_optimizer=gen_optimizer,
-            disc_optimizer=disc_optimizer
-        )
-        
-        # Add domain model and optimizer if domain adaptation is used
-        if domain_weight is not None:
-            ckpt.domain_optimizer = domain_optimizer
-        
-        # Create checkpoint manager - save only current epoch
-        checkpoint_dir = f"{model_path}/{sub_folder}/model/"
-        
-        # Save checkpoint
-        milestone_path = ckpt.save(f"{checkpoint_dir}/epoch_{epoch+1}")
-        print(f"Checkpoint saved at epoch {epoch+1}: {milestone_path}")
-
-        # Save optimizer configs
-        optimizer_configs = {
-            'gen_optimizer_config': gen_optimizer.get_config(),
-            'disc_optimizer_config': disc_optimizer.get_config(), 
-            'domain_optimizer_config': domain_optimizer.get_config()
-        }
-        config_path = f"{checkpoint_dir}/optimizer_configs.json"  # No epoch number
-        # Only save if file doesn't exist (to avoid overwriting)
-        if not os.path.exists(config_path):
-            import json
-            with open(config_path, 'w') as f:
-                json.dump(optimizer_configs, f, indent=2)
-            print(f"Optimizer configs saved to: {config_path}")
-    
-    # === save and overwrite at checkpoints
-    # train
-    perform_to_save = {}
-    perform_to_save['train_loss'] = train_loss
-    perform_to_save['train_est_loss'] = train_est_loss
-    perform_to_save['train_disc_loss'] = train_disc_loss
-    perform_to_save['train_domain_loss'] = train_domain_loss
-    perform_to_save['train_est_loss_target'] = train_est_loss_target
-    # val
-    perform_to_save['val_est_loss'] = val_est_loss
-    perform_to_save['val_est_loss_source'] = val_est_loss_source
-    perform_to_save['val_loss'] = val_loss
-    perform_to_save['val_est_loss_target'] = val_est_loss_target
-    perform_to_save['val_gan_disc_loss'] = val_gan_disc_loss
-    perform_to_save['val_domain_disc_loss'] = val_domain_disc_loss
-    perform_to_save['source_acc'] = source_acc
-    perform_to_save['target_acc'] = target_acc
-    perform_to_save['acc'] = acc
-    perform_to_save['nmse_val_source'] = nmse_val_source
-    perform_to_save['nmse_val_target'] = nmse_val_target
-    perform_to_save['nmse_val'] = nmse_val
-    #
-    perform_to_save['pad_pca_svm'] = pad_pca_svm
-    perform_to_save['pad_pca_lda'] = pad_pca_lda
-    perform_to_save['pad_pca_logreg'] = pad_pca_logreg
-    perform_to_save['epoc_pad'] = epoc_pad
-    perform_to_save['pad_svm'] = pad_svm
-
-    # save
-    os.makedirs(f"{model_path}/{sub_folder}/performance/", exist_ok=True)
-    savemat(model_path + '/' + sub_folder + '/performance/performance.mat', perform_to_save)
-    
-    # Plot figures === save and overwrite at checkpoints
-    if domain_weight:
-        figLoss(line_list=[(nmse_val_source, 'Source Domain'), (nmse_val_target, 'Target Domain')], xlabel='Epoch', ylabel='NMSE',
-                    title='NMSE in Validation', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='NMSE_val')
-        figLoss(line_list=[(source_acc, 'Source Domain'), (target_acc, 'Target Domain')], xlabel='Epoch', ylabel='Discrimination Accuracy',
-                    title='Domain Discrimination Accuracy in Validation', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Domain_acc')
-    #
-    figLoss(line_list=[(train_est_loss, 'GAN Generate Loss'), (train_disc_loss, 'GAN Discriminator Loss')], xlabel='Epoch', ylabel='Loss',
-                title='Training GAN Losses', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='GAN_train')
-    figLoss(line_list=[(train_loss, 'Training'), (val_loss, 'Validating')], xlabel='Epoch', ylabel='Total Loss',
-                title='Training and Validating Total Loss', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Loss_total')
-    figLoss(line_list=[(train_est_loss, 'Training-Source'),  (train_est_loss_target, 'Training-Target'), 
-                            (val_est_loss_source, 'Validating-Source'), (val_est_loss_target, 'Validating-Target')], xlabel='Epoch', ylabel='Estimation Loss',
-                title='Training and Validating Estimation Loss', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Loss_est')
-        # estimation loss: MSE loss, before de-scale
-    figLoss(line_list=[(train_domain_loss, 'Training'), (val_domain_disc_loss, 'Validating')], xlabel='Epoch', ylabel='Domain Discrimination Loss',
-                title='Training and Validating Domain Discrimination Loss', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Loss_domain')
-
 
 def load_checkpoint(model, model_path, sub_folder, epoch_load, optimizer=None, domain_model=None, domain_weight=True):
     """
