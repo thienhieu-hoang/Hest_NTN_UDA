@@ -3,9 +3,15 @@ import numpy as np
 import scipy.io as sio
 import matplotlib.pyplot as plt
 
-from Domain_Adversarial.helper import data
-from . import PAD
-from . import utils
+try:
+    from . import PAD  # For package/notebook context
+except ImportError:
+    import PAD  # For direct execution context
+
+try:
+    from . import utils  # For package/notebook context
+except ImportError:
+    import utils  # For direct execution context
 
 def figLoss(line_list=None, index_save=1, figure_save_path=None, fig_show=False, 
             fig_name=None, xlabel='Epoch', ylabel='Loss', title='Training and Validation Loss', x=None):

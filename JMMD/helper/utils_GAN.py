@@ -289,19 +289,25 @@ class JMMDLoss(keras.layers.Layer):
         
         return jmmd_loss / len(source_list)
 
-# def gradient_penalty(discriminator, real, fake, batch_size):
-#     alpha = tf.random.uniform([batch_size, 1, 1, 1], 0.0, 1.0)
-#     diff = fake - real
-#     interpolated = real + alpha * diff
-#     with tf.GradientTape() as gp_tape:
-#         gp_tape.watch(interpolated)
-#         pred = discriminator(interpolated, training=True)
-#     grads = gp_tape.gradient(pred, [interpolated])[0]
-#     norm = tf.sqrt(tf.reduce_sum(tf.square(grads), axis=[1, 2, 3]))
-#     gp = tf.reduce_mean((norm - 1.0) ** 2)
-#     return gp
-def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1, save_features = False,
-                            nsymb=14, adv_weight=0.01, est_weight=1.0, jmmd_weight=0.5, linear_interp=False):
+
+def compute_total_smoothness_loss(x, temporal_weight=0.02, frequency_weight=0.1):
+    """
+        x: Generated channel matrix of shape (batch, freq, time, channels)
+    """
+    # Temporal smoothness (along time axis=2)
+    temporal_diff = x[:, :, 1:, :] - x[:, :, :-1, :]
+    temporal_loss = tf.reduce_mean(tf.square(temporal_diff))
+    
+    # Frequency smoothness (along frequency axis=1) 
+    frequency_diff = x[:, 1:, :, :] - x[:, :-1, :, :]
+    frequency_loss = tf.reduce_mean(tf.square(frequency_diff))
+    
+    loss_smoothness = temporal_weight * temporal_loss + frequency_weight * frequency_loss
+    return loss_smoothness
+
+def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1, 
+                            save_features = False, nsymb=14, adv_weight=0.01, 
+                            temporal_weight=0, frequency_weight=0, est_weight=1.0, jmmd_weight=0.5, linear_interp=False):
     """
     Modified WGAN-GP training step using JMMD instead of domain discriminator
     
@@ -404,10 +410,19 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
             # JMMD loss between source and target features
             jmmd_loss = jmmd_loss_fn(features_src, features_tgt)
             
+            # ADD TEMPORAL SMOOTHNESS LOSS
+            if temporal_weight != 0 or frequency_weight != 0:
+                smoothness_loss_src = compute_total_smoothness_loss(x_fake_src, temporal_weight=temporal_weight, frequency_weight=frequency_weight)
+                smoothness_loss_tgt = compute_total_smoothness_loss(x_fake_tgt, temporal_weight=temporal_weight, frequency_weight=frequency_weight)
+                smoothness_loss = (smoothness_loss_src + smoothness_loss_tgt) / 2
+            else:
+                smoothness_loss = 0.0
+        
             # Total generator loss
             g_loss = (est_weight * g_est_loss + 
-                     adv_weight * g_adv_loss + 
-                     jmmd_weight * jmmd_loss)
+                    adv_weight * g_adv_loss + 
+                    jmmd_weight * jmmd_loss + 
+                    smoothness_loss)
             
             # Add L2 regularization
             if model.generator.losses:
@@ -475,7 +490,9 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
         avg_epoc_loss_d=avg_loss_d
     )
     
-def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, adv_weight=0.01, est_weight=1.0, jmmd_weight=0.5, linear_interp=False):
+def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, adv_weight=0.01, 
+                        temporal_weight=0.0, frequency_weight=0.0,
+                        est_weight=1.0, jmmd_weight=0.5, linear_interp=False):
     """
     Validation step for WGAN-GP model with JMMD. Returns H_sample and epoc_eval_return (summary metrics).
     
@@ -572,6 +589,21 @@ def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, adv_w
             # Compute JMMD loss between source and target features
             jmmd_loss = jmmd_loss_fn(features_src, features_tgt)
             epoc_jmmd_loss += jmmd_loss.numpy() * x_src.shape[0]
+        
+        # === ADD SMOOTHNESS LOSS COMPUTATION (INSERT HERE) ===
+        if temporal_weight != 0 or frequency_weight != 0:
+            # Convert back to tensors if needed for smoothness computation
+            preds_src_tensor = tf.convert_to_tensor(preds_src) if not tf.is_tensor(preds_src) else preds_src
+            preds_tgt_tensor = tf.convert_to_tensor(preds_tgt) if not tf.is_tensor(preds_tgt) else preds_tgt
+            
+            smoothness_loss_src = compute_total_smoothness_loss(
+                preds_src_tensor, temporal_weight=temporal_weight, frequency_weight=frequency_weight
+            )
+            smoothness_loss_tgt = compute_total_smoothness_loss(
+                preds_tgt_tensor, temporal_weight=temporal_weight, frequency_weight=frequency_weight
+            )
+            batch_smoothness_loss = (smoothness_loss_src + smoothness_loss_tgt) / 2
+            epoc_smoothness_loss += batch_smoothness_loss.numpy() * x_src.shape[0]
 
         # === Save H samples for visualization at first batch ===
         if idx == 0:
@@ -620,6 +652,8 @@ def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, adv_w
     
     # JMMD loss average (replaces domain discriminator loss)
     avg_jmmd_loss = epoc_jmmd_loss / N_val_source if epoc_jmmd_loss > 0 else 0.0
+    # smoothness loss average
+    avg_smoothness_loss = epoc_smoothness_loss / N_val_source if epoc_smoothness_loss > 0 else 0.0
     
     # For compatibility with existing code, we'll set domain accuracy to 0.5 (random)
     # since JMMD doesn't have classification accuracy
@@ -628,7 +662,8 @@ def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, adv_w
     avg_domain_acc = 0.5         # Neutral value for JMMD (no classification)
 
     # Weighted total loss (for comparison with training)
-    avg_total_loss = est_weight * avg_loss_est + adv_weight * avg_gan_disc_loss + jmmd_weight * avg_jmmd_loss
+    avg_total_loss = est_weight * avg_loss_est + adv_weight * avg_gan_disc_loss \
+                     + jmmd_weight * avg_jmmd_loss + avg_smoothness_loss
 
     # Compose epoc_eval_return - Replace domain discriminator loss with JMMD loss
     epoc_eval_return = [
@@ -636,7 +671,8 @@ def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, adv_w
         avg_loss_est_source, avg_loss_est_target, avg_loss_est,
         avg_gan_disc_loss, avg_jmmd_loss,  # Replace domain_disc_loss with jmmd_loss
         avg_nmse_source, avg_nmse_target, avg_nmse,
-        avg_domain_acc_source, avg_domain_acc_target, avg_domain_acc  # Keep for compatibility
+        avg_domain_acc_source, avg_domain_acc_target, avg_domain_acc,  # Keep for compatibility
+        avg_smoothness_loss
     ]
 
     return H_sample, epoc_eval_return

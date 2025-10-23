@@ -4,8 +4,10 @@ import h5py
 import os
 # from torch.utils.data import DataLoader, TensorDataset, RandomSampler
 
-from . import utils
-# import utils_GAN
+try:
+    from . import utils  # For package/notebook context
+except ImportError:
+    import utils  # For direct execution context
 
 
 def load_data(outer_file_path, rows, fc, snr, batch_size=32):
