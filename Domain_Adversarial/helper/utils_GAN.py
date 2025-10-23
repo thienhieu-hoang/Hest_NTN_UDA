@@ -11,7 +11,10 @@ import sys
 import os 
 
 from dataclasses import dataclass
-from . import utils
+try:
+    from . import utils  # For package/notebook context
+except ImportError:
+    import utils  # For direct execution context
 
 
 @dataclass
