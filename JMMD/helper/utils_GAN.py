@@ -756,7 +756,7 @@ def save_checkpoint_jmmd(model, save_model, model_path, sub_folder, epoch, metri
     os.makedirs(f"{model_path}/{sub_folder}/model/", exist_ok=True)
     if save_model:
         # Create checkpoint with all model components and optimizers
-        gen_optimizer, disc_optimizer, domain_optimizer = optimizer
+        gen_optimizer, disc_optimizer = optimizer[:2]
         
         # Create checkpoint object
         ckpt = tf.train.Checkpoint(
@@ -766,9 +766,6 @@ def save_checkpoint_jmmd(model, save_model, model_path, sub_folder, epoch, metri
             disc_optimizer=disc_optimizer
         )
         
-        # Add domain model and optimizer if domain adaptation is used
-        if domain_weight is not None:
-            ckpt.domain_optimizer = domain_optimizer
         
         # Create checkpoint manager - save only current epoch
         checkpoint_dir = f"{model_path}/{sub_folder}/model/"
@@ -780,8 +777,7 @@ def save_checkpoint_jmmd(model, save_model, model_path, sub_folder, epoch, metri
         # Save optimizer configs
         optimizer_configs = {
             'gen_optimizer_config': gen_optimizer.get_config(),
-            'disc_optimizer_config': disc_optimizer.get_config(), 
-            'domain_optimizer_config': domain_optimizer.get_config()
+            'disc_optimizer_config': disc_optimizer.get_config()
         }
         config_path = f"{checkpoint_dir}/optimizer_configs.json"  # No epoch number
         # Only save if file doesn't exist (to avoid overwriting)
@@ -796,12 +792,6 @@ def save_checkpoint_jmmd(model, save_model, model_path, sub_folder, epoch, metri
     savemat(model_path + '/' + sub_folder + '/performance/performance.mat', perform_to_save)
     
     # Plot figures === save and overwrite at checkpoints
-    if domain_weight:
-        figLoss(line_list=[(metrics['nmse_val_source'], 'Source Domain'), (metrics['nmse_val_target'], 'Target Domain')], xlabel='Epoch', ylabel='NMSE',
-                    title='NMSE in Validation', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='NMSE_val')
-        figLoss(line_list=[(metrics['source_acc'], 'Source Domain'), (metrics['target_acc'], 'Target Domain')], xlabel='Epoch', ylabel='Discrimination Accuracy',
-                    title='Domain Discrimination Accuracy in Validation', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Domain_acc')
-    #
     figLoss(line_list=[(metrics['train_est_loss'], 'GAN Generate Loss'), (metrics['train_disc_loss'], 'GAN Discriminator Loss')], xlabel='Epoch', ylabel='Loss',
                 title='Training GAN Losses', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='GAN_train')
     figLoss(line_list=[(metrics['train_loss'], 'Training'), (metrics['val_loss'], 'Validating')], xlabel='Epoch', ylabel='Total Loss',
