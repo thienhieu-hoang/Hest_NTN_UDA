@@ -306,8 +306,7 @@ def compute_total_smoothness_loss(x, temporal_weight=0.02, frequency_weight=0.1)
     return loss_smoothness
 
 def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1, 
-                            save_features = False, nsymb=14, adv_weight=0.01, 
-                            temporal_weight=0, frequency_weight=0, est_weight=1.0, jmmd_weight=0.5, linear_interp=False):
+                            save_features = False, nsymb=14, weights=None, linear_interp=False):
     """
     Modified WGAN-GP training step using JMMD instead of domain discriminator
     
@@ -323,6 +322,12 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
         loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
     loss_fn_est, loss_fn_bce = loss_fn[:2]  # Only need first two loss functions
     gen_optimizer, disc_optimizer = optimizers[:2]  # No domain optimizer needed
+    
+    adv_weight = weights.get('adv_weight', 0.01)
+    temporal_weight = weights.get('temporal_weight', 0.0)
+    frequency_weight = weights.get('frequency_weight', 0.0)
+    est_weight = weights.get('est_weight', 1.0)
+    jmmd_weight = weights.get('jmmd_weight', 0.5)
     
     # Initialize JMMD loss
     jmmd_loss_fn = JMMDLoss()
@@ -489,10 +494,8 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
         film_features_source=features_src[-1] if features_src else None,
         avg_epoc_loss_d=avg_loss_d
     )
-    
-def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, adv_weight=0.01, 
-                        temporal_weight=0.0, frequency_weight=0.0,
-                        est_weight=1.0, jmmd_weight=0.5, linear_interp=False):
+
+def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, weights=None, linear_interp=False):
     """
     Validation step for WGAN-GP model with JMMD. Returns H_sample and epoc_eval_return (summary metrics).
     
@@ -509,6 +512,12 @@ def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, adv_w
     """
     from sklearn.metrics import accuracy_score
     
+    adv_weight = weights.get('adv_weight', 0.01)
+    temporal_weight = weights.get('temporal_weight', 0.0)
+    frequency_weight = weights.get('frequency_weight', 0.0)
+    est_weight = weights.get('est_weight', 1.0)
+    jmmd_weight = weights.get('jmmd_weight', 0.5)
+    
     loader_H_input_val_source, loader_H_true_val_source, loader_H_input_val_target, loader_H_true_val_target = loader_H
     loss_fn_est, loss_fn_bce = loss_fn[:2]  # Only need first two loss functions
     
@@ -523,6 +532,7 @@ def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, adv_w
     epoc_nmse_val_target = 0.0
     epoc_gan_disc_loss = 0.0
     epoc_jmmd_loss = 0.0  # Replace domain loss with JMMD
+    epoc_smoothness_loss = 0.0
     H_sample = []
 
     for idx in range(loader_H_true_val_source.total_batches):
@@ -666,30 +676,81 @@ def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, adv_w
                      + jmmd_weight * avg_jmmd_loss + avg_smoothness_loss
 
     # Compose epoc_eval_return - Replace domain discriminator loss with JMMD loss
-    epoc_eval_return = [
-        avg_total_loss,
-        avg_loss_est_source, avg_loss_est_target, avg_loss_est,
-        avg_gan_disc_loss, avg_jmmd_loss,  # Replace domain_disc_loss with jmmd_loss
-        avg_nmse_source, avg_nmse_target, avg_nmse,
-        avg_domain_acc_source, avg_domain_acc_target, avg_domain_acc,  # Keep for compatibility
-        avg_smoothness_loss
-    ]
+    epoc_eval_return = {
+        'avg_total_loss': avg_total_loss,
+        'avg_loss_est_source': avg_loss_est_source,
+        'avg_loss_est_target': avg_loss_est_target, 
+        'avg_loss_est': avg_loss_est,
+        'avg_gan_disc_loss': avg_gan_disc_loss,
+        'avg_jmmd_loss': avg_jmmd_loss,
+        'avg_nmse_source': avg_nmse_source,
+        'avg_nmse_target': avg_nmse_target,
+        'avg_nmse': avg_nmse,
+        'avg_domain_acc_source': avg_domain_acc_source,
+        'avg_domain_acc_target': avg_domain_acc_target,
+        'avg_domain_acc': avg_domain_acc,
+        'avg_smoothness_loss': avg_smoothness_loss
+    }
 
     return H_sample, epoc_eval_return
 
-def save_checkpoint_(model, save_model, model_path, sub_folder, epoch, metrics):
-    figLoss = metrics['figLoss']; savemat = metrics['savemat']; 
-    train_loss = metrics['train_loss']; train_est_loss = metrics['train_est_loss']
-    train_domain_loss = metrics['train_domain_loss']; train_est_loss_target = metrics['train_est_loss_target']; 
-    val_est_loss = metrics['val_est_loss']; val_est_loss_source = metrics['val_est_loss_source']; 
-    val_loss = metrics['val_loss']; val_est_loss_target = metrics['val_est_loss_target']
-    val_gan_disc_loss = metrics['val_gan_disc_loss']; val_domain_disc_loss = metrics['val_domain_disc_loss']; source_acc = metrics['source_acc']
-    target_acc = metrics['target_acc']; acc = metrics['acc']; 
-    nmse_val_source = metrics['nmse_val_source']; nmse_val_target = metrics['nmse_val_target']
-    nmse_val = metrics['nmse_val']; 
-    pad_pca_svm = metrics['pad_pca_svm']; pad_pca_lda = metrics['pad_pca_lda']; pad_pca_logreg = metrics['pad_pca_logreg']
-    epoc_pad = metrics['epoc_pad']; pad_svm = metrics['pad_svm']; train_disc_loss = metrics['train_disc_loss']; 
-    domain_weight = metrics['domain_weight']; optimizer = metrics['optimizer']
+def post_val(epoc_val_return, epoch, n_epochs, val_metrics, domain_weight=True):
+    """
+    Updated post_val function that works with validation metrics dictionary
+    
+    Args:
+        epoc_val_return: Dictionary containing validation results
+        epoch: Current epoch number
+        n_epochs: Total number of epochs
+        val_metrics: Dictionary to store validation metrics
+        domain_weight: Whether domain adaptation is used
+    """
+    #
+    val_metrics['val_loss'].append(epoc_val_return['avg_total_loss'])
+    print(f"epoch {epoch+1}/{n_epochs} (Val) Weighted Total Loss: {epoc_val_return['avg_total_loss']:.6f}")
+    
+    val_metrics['val_est_loss'].append(epoc_val_return['avg_loss_est'])
+    print(f"epoch {epoch+1}/{n_epochs} (Val) Average Estimation Loss (mean): {epoc_val_return['avg_loss_est']:.6f}")
+    
+    val_metrics['val_est_loss_source'].append(epoc_val_return['avg_loss_est_source'])
+    print(f"epoch {epoch+1}/{n_epochs} (Val) Average Estimation Loss (Source): {epoc_val_return['avg_loss_est_source']:.6f}")
+    
+    if domain_weight:
+        val_metrics['val_est_loss_target'].append(epoc_val_return['avg_loss_est_target'])
+        print(f"epoch {epoch+1}/{n_epochs} (Val) Average Estimation Loss (Target): {epoc_val_return['avg_loss_est_target']:.6f}")
+    
+    val_metrics['val_gan_disc_loss'].append(epoc_val_return['avg_gan_disc_loss'])
+    print(f"epoch {epoch+1}/{n_epochs} (Val) GAN Discriminator Loss: {epoc_val_return['avg_gan_disc_loss']:.6f}")
+    
+    if domain_weight:
+        val_metrics['val_domain_disc_loss'].append(epoc_val_return['avg_jmmd_loss'])
+        print(f"epoch {epoch+1}/{n_epochs} (Val) JMMD Loss: {epoc_val_return['avg_jmmd_loss']:.6f}")
+    
+    val_metrics['nmse_val_source'].append(epoc_val_return['avg_nmse_source'])
+    val_metrics['nmse_val_target'].append(epoc_val_return['avg_nmse_target'])
+    val_metrics['nmse_val'].append(epoc_val_return['avg_nmse'])
+    print(f"epoch {epoch+1}/{n_epochs} (Val) NMSE (Source): {epoc_val_return['avg_nmse_source']:.6f}, NMSE (Target): {epoc_val_return['avg_nmse_target']:.6f}, NMSE (Mean): {epoc_val_return['avg_nmse']:.6f}")
+    
+    val_metrics['source_acc'].append(epoc_val_return['avg_domain_acc_source'])
+    val_metrics['target_acc'].append(epoc_val_return['avg_domain_acc_target'])
+    val_metrics['acc'].append(epoc_val_return['avg_domain_acc'])
+    print(f"epoch {epoch+1}/{n_epochs} (Val) Domain Accuracy (Average): {epoc_val_return['avg_domain_acc']:.4f}")
+    
+    # Add smoothness loss if it exists
+    val_metrics['val_smoothness_loss'].append(epoc_val_return['avg_smoothness_loss'])
+    print(f"epoch {epoch+1}/{n_epochs} (Val) Smoothness Loss: {epoc_val_return['avg_smoothness_loss']:.6f}")
+        
+def save_checkpoint_jmmd(model, save_model, model_path, sub_folder, epoch, metrics):
+    exclude_keys = {'figLoss', 'savemat', 'optimizer'}  # Add any keys you want to exclude
+    
+    # Create performance dictionary by excluding unwanted keys
+    perform_to_save = {k: v for k, v in metrics.items() if k not in exclude_keys}
+    
+    # Extract needed items for other operations
+    figLoss = metrics['figLoss']
+    savemat = metrics['savemat'] 
+    optimizer = metrics['optimizer']
+    domain_weight = metrics['weights']['domain_weight']
 
     # Save model
     os.makedirs(f"{model_path}/{sub_folder}/model/", exist_ok=True)
@@ -729,34 +790,6 @@ def save_checkpoint_(model, save_model, model_path, sub_folder, epoch, metrics):
             with open(config_path, 'w') as f:
                 json.dump(optimizer_configs, f, indent=2)
             print(f"Optimizer configs saved to: {config_path}")
-    
-    # === save and overwrite at checkpoints
-    # train
-    perform_to_save = {}
-    perform_to_save['train_loss'] = train_loss
-    perform_to_save['train_est_loss'] = train_est_loss
-    perform_to_save['train_disc_loss'] = train_disc_loss
-    perform_to_save['train_domain_loss'] = train_domain_loss
-    perform_to_save['train_est_loss_target'] = train_est_loss_target
-    # val
-    perform_to_save['val_est_loss'] = val_est_loss
-    perform_to_save['val_est_loss_source'] = val_est_loss_source
-    perform_to_save['val_loss'] = val_loss
-    perform_to_save['val_est_loss_target'] = val_est_loss_target
-    perform_to_save['val_gan_disc_loss'] = val_gan_disc_loss
-    perform_to_save['val_domain_disc_loss'] = val_domain_disc_loss
-    perform_to_save['source_acc'] = source_acc
-    perform_to_save['target_acc'] = target_acc
-    perform_to_save['acc'] = acc
-    perform_to_save['nmse_val_source'] = nmse_val_source
-    perform_to_save['nmse_val_target'] = nmse_val_target
-    perform_to_save['nmse_val'] = nmse_val
-    #
-    perform_to_save['pad_pca_svm'] = pad_pca_svm
-    perform_to_save['pad_pca_lda'] = pad_pca_lda
-    perform_to_save['pad_pca_logreg'] = pad_pca_logreg
-    perform_to_save['epoc_pad'] = epoc_pad
-    perform_to_save['pad_svm'] = pad_svm
 
     # save
     os.makedirs(f"{model_path}/{sub_folder}/performance/", exist_ok=True)
@@ -764,18 +797,18 @@ def save_checkpoint_(model, save_model, model_path, sub_folder, epoch, metrics):
     
     # Plot figures === save and overwrite at checkpoints
     if domain_weight:
-        figLoss(line_list=[(nmse_val_source, 'Source Domain'), (nmse_val_target, 'Target Domain')], xlabel='Epoch', ylabel='NMSE',
+        figLoss(line_list=[(metrics['nmse_val_source'], 'Source Domain'), (metrics['nmse_val_target'], 'Target Domain')], xlabel='Epoch', ylabel='NMSE',
                     title='NMSE in Validation', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='NMSE_val')
-        figLoss(line_list=[(source_acc, 'Source Domain'), (target_acc, 'Target Domain')], xlabel='Epoch', ylabel='Discrimination Accuracy',
+        figLoss(line_list=[(metrics['source_acc'], 'Source Domain'), (metrics['target_acc'], 'Target Domain')], xlabel='Epoch', ylabel='Discrimination Accuracy',
                     title='Domain Discrimination Accuracy in Validation', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Domain_acc')
     #
-    figLoss(line_list=[(train_est_loss, 'GAN Generate Loss'), (train_disc_loss, 'GAN Discriminator Loss')], xlabel='Epoch', ylabel='Loss',
+    figLoss(line_list=[(metrics['train_est_loss'], 'GAN Generate Loss'), (metrics['train_disc_loss'], 'GAN Discriminator Loss')], xlabel='Epoch', ylabel='Loss',
                 title='Training GAN Losses', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='GAN_train')
-    figLoss(line_list=[(train_loss, 'Training'), (val_loss, 'Validating')], xlabel='Epoch', ylabel='Total Loss',
+    figLoss(line_list=[(metrics['train_loss'], 'Training'), (metrics['val_loss'], 'Validating')], xlabel='Epoch', ylabel='Total Loss',
                 title='Training and Validating Total Loss', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Loss_total')
-    figLoss(line_list=[(train_est_loss, 'Training-Source'),  (train_est_loss_target, 'Training-Target'), 
-                            (val_est_loss_source, 'Validating-Source'), (val_est_loss_target, 'Validating-Target')], xlabel='Epoch', ylabel='Estimation Loss',
+    figLoss(line_list=[(metrics['train_est_loss'], 'Training-Source'),  (metrics['train_est_loss_target'], 'Training-Target'), 
+                            (metrics['val_est_loss_source'], 'Validating-Source'), (metrics['val_est_loss_target'], 'Validating-Target')], xlabel='Epoch', ylabel='Estimation Loss',
                 title='Training and Validating Estimation Loss', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Loss_est')
         # estimation loss: MSE loss, before de-scale
-    figLoss(line_list=[(train_domain_loss, 'Training'), (val_domain_disc_loss, 'Validating')], xlabel='Epoch', ylabel='Domain Discrimination Loss',
+    figLoss(line_list=[(metrics['train_domain_loss'], 'Training'), (metrics['val_domain_disc_loss'], 'Validating')], xlabel='Epoch', ylabel='Domain Discrimination Loss',
                 title='Training and Validating Domain Discrimination Loss', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Loss_domain')
