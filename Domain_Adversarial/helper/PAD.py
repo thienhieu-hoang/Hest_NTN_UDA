@@ -13,68 +13,72 @@ import time
 from sklearn.decomposition import IncrementalPCA
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 
 
 def original_PAD(loader_source, loader_target):
-  # Calculate initial PAD of 2 original training datasets
-  loader_source.reset()
-  loader_target.reset()
-  all_features = []
-  all_labels = []
-  #
-  for batch_idx in range(loader_target.total_batches):
-      # batch_target: shape (batch_size, 792, 2)
-      batch_target = loader_target.next_batch()  # (batch_size, 792,2)
-      batch_target = batch_target[:,:, 0:2]
-      real_target = batch_target['real']  # (batch_size, 792,2)
-      imag_target = batch_target['imag']  # (batch_size, 792,2)
-      real_flat = real_target.reshape(real_target.shape[0], -1)  # (batch_size, 1584)
-      imag_flat = imag_target.reshape(imag_target.shape[0], -1)  # (batch_size, 1584)
-      combined_target = np.concatenate([real_flat, imag_flat], axis=1)  # (batch_size, 3168)
-      target_labels = (np.ones(combined_target.shape[0], dtype=int))
-      # 
-      batch_source = loader_source.next_batch()  # (batch_size, 792, 3)
-      batch_source = batch_source[:,:,0:2]
-      real_source = batch_source['real']  # (batch_size, 792,2)
-      imag_source = batch_source['imag']  # (batch_size, 792,2)
-      real_flat_source = real_source.reshape(real_source.shape[0], -1)  # (batch_size, 1584)
-      imag_flat_source = imag_source.reshape(imag_source.shape[0], -1)  # (batch_size, 1584)
-      combined_source = np.concatenate([real_flat_source, imag_flat_source], axis=1)  # (batch_size, 3168)
-      source_labels = (np.zeros(combined_source.shape[0], dtype=int))
+    # Calculate initial PAD of 2 original training datasets
+    loader_source.reset()
+    loader_target.reset()
+    all_features = []
+    all_labels = []
+    #
+    for batch_idx in range(loader_target.total_batches):
+        # batch_target: shape (batch_size, 792, 2)
+        batch_target = loader_target.next_batch()  # (batch_size, 792,2)
+        batch_target = batch_target[:,:, 0:2]
+        real_target = batch_target['real']  # (batch_size, 792,2)
+        imag_target = batch_target['imag']  # (batch_size, 792,2)
+        real_flat = real_target.reshape(real_target.shape[0], -1)  # (batch_size, 1584)
+        imag_flat = imag_target.reshape(imag_target.shape[0], -1)  # (batch_size, 1584)
+        combined_target = np.concatenate([real_flat, imag_flat], axis=1)  # (batch_size, 3168)
+        target_labels = (np.ones(combined_target.shape[0], dtype=int))
+        # 
+        batch_source = loader_source.next_batch()  # (batch_size, 792, 3)
+        batch_source = batch_source[:,:,0:2]
+        real_source = batch_source['real']  # (batch_size, 792,2)
+        imag_source = batch_source['imag']  # (batch_size, 792,2)
+        real_flat_source = real_source.reshape(real_source.shape[0], -1)  # (batch_size, 1584)
+        imag_flat_source = imag_source.reshape(imag_source.shape[0], -1)  # (batch_size, 1584)
+        combined_source = np.concatenate([real_flat_source, imag_flat_source], axis=1)  # (batch_size, 3168)
+        source_labels = (np.zeros(combined_source.shape[0], dtype=int))
 
-      # --- Combine and append ---
-      all_features.append(combined_source)
-      all_features.append(combined_target)
-      all_labels.append(source_labels)
-      all_labels.append(target_labels)
+        # --- Combine and append ---
+        all_features.append(combined_source)
+        all_features.append(combined_target)
+        all_labels.append(source_labels)
+        all_labels.append(target_labels)
 
-  # Stack all batches into a single dataset
-  X = np.vstack(all_features)  # shape: (n_samples, 3168)
-  y = np.concatenate(all_labels)  # shape: (n_samples,)
-  print('X shape = ', X.shape)
+    # Stack all batches into a single dataset
+    X = np.vstack(all_features)  # shape: (n_samples, 3168)
+    y = np.concatenate(all_labels)  # shape: (n_samples,)
+    print('X shape = ', X.shape)
 
-  X1, X2, y1, y2 = train_test_split(X, y, test_size=0.5, random_state=42, shuffle=True)
+    X1, X2, y1, y2 = train_test_split(X, y, test_size=0.5, random_state=42, shuffle=True)
+    scaler = StandardScaler()
+    X1 = scaler.fit_transform(X1)
+    X2 = scaler.transform(X2)
+    
+    print('X1 shape = ', X1.shape, 'y1 shape = ', y1.shape)  
+    print(X2.shape, y2.shape) 
 
-  print('X1 shape = ', X1.shape, 'y1 shape = ', y1.shape)  
-  print(X2.shape, y2.shape) 
-
-  C_values = [0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0]
-  best_epsilon = 1.0
-  best_C = None
-  for C in C_values:
-      svm = SVC(C=C, probability=True)
-      svm.fit(X1, y1)
-      accuracy = svm.score(X2, y2)
-      error_rate = 1 - accuracy
-      print(f"C: {C}, Error rate: {error_rate:.4f}")
-      if error_rate < best_epsilon:
-          best_epsilon = error_rate
-          best_C = C
-  print(f"Best C: {best_C}, Best error rate: {best_epsilon:.4f}")
-  pad = 2 * (1 - 2 * best_epsilon)
-  print(f"PAD = {pad:.4f}")
-  
-  return pad 
+    C_values = [0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0]
+    best_epsilon = 1.0
+    best_C = None
+    for C in C_values:
+        svm = SVC(C=C, probability=True)
+        svm.fit(X1, y1)
+        accuracy = svm.score(X2, y2)
+        error_rate = 1 - accuracy
+        print(f"C: {C}, Error rate: {error_rate:.4f}")
+        if error_rate < best_epsilon:
+            best_epsilon = error_rate
+            best_C = C
+    print(f"Best C: {best_C}, Best error rate: {best_epsilon:.4f}")
+    pad = 2 * (1 - 2 * best_epsilon)
+    print(f"PAD = {pad:.4f}")
+    
+    return pad 
 
 def cal_PAD(features_source, features_target, num_samples=2048, pca_components=None):
     
@@ -114,7 +118,10 @@ def cal_PAD(features_source, features_target, num_samples=2048, pca_components=N
         gc.collect()  # Optional, to free memory immediately
 
     X1, X2, y1, y2 = train_test_split(X, y, test_size=0.5, random_state=42, shuffle=True)
-    
+    scaler = StandardScaler()
+    X1 = scaler.fit_transform(X1)
+    X2 = scaler.transform(X2)
+
     C_values = [0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0]
     best_epsilon = 1.0
     best_C = None
@@ -263,6 +270,9 @@ def original_PAD_SGD(loader_H_1_6_11_train_source, loader_H_1_6_11_train_target)
     print('X shape = ', X.shape)
 
     X1, X2, y1, y2 = train_test_split(X, y, test_size=0.5, random_state=42, shuffle=True)
+    scaler = StandardScaler()
+    X1 = scaler.fit_transform(X1)
+    X2 = scaler.transform(X2)
 
     print('X1 shape = ', X1.shape, 'y1 shape = ', y1.shape)  
     print(X2.shape, y2.shape) 
@@ -346,7 +356,10 @@ def original_PAD_KernelApprox_SGD(loader_H_1_6_11_train_source, loader_H_1_6_11_
 
     from sklearn.model_selection import train_test_split
     X1, X2, y1, y2 = train_test_split(X, y, test_size=0.5, random_state=42, shuffle=True)
-
+    scaler = StandardScaler()
+    X1 = scaler.fit_transform(X1)
+    X2 = scaler.transform(X2)
+    
     print('X1 shape = ', X1.shape, 'y1 shape = ', y1.shape)  
     print(X2.shape, y2.shape) 
 
@@ -638,6 +651,11 @@ def calc_pad_svm(X, y):
     # Split into train/test
     X1, X2, y1, y2 = train_test_split(X, y, test_size=0.5, random_state=42, shuffle=True)
 
+    # Standardize features
+    scaler = StandardScaler()
+    X1_scaled = scaler.fit_transform(X1)
+    X2_scaled = scaler.transform(X2)
+
     # Try multiple C values
     C_values = [0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0]
     best_epsilon = 1.0
@@ -645,8 +663,8 @@ def calc_pad_svm(X, y):
 
     for C in C_values:
         svm = SVC(C=C, probability=True)
-        svm.fit(X1, y1)
-        accuracy = svm.score(X2, y2)
+        svm.fit(X1_scaled, y1)
+        accuracy = svm.score(X2_scaled, y2)
         error_rate = 1 - accuracy
         print(f"== C: {C}, Error rate: {error_rate:.4f}")
         if error_rate < best_epsilon:
@@ -673,7 +691,10 @@ def calc_pad_lda(X, y):
     """
     # Split train/test
     X1, X2, y1, y2 = train_test_split(X, y, test_size=0.5, random_state=42, shuffle=True)
-
+    scaler = StandardScaler()
+    X1 = scaler.fit_transform(X1)
+    X2 = scaler.transform(X2)
+    
     lda = LinearDiscriminantAnalysis()
     lda.fit(X1, y1)
     accuracy = lda.score(X2, y2)
@@ -701,6 +722,9 @@ def calc_pad_logreg(X, y):
     """
     # Split train/test
     X1, X2, y1, y2 = train_test_split(X, y, test_size=0.5, random_state=42, shuffle=True)
+    scaler = StandardScaler()
+    X1 = scaler.fit_transform(X1)
+    X2 = scaler.transform(X2)
 
     logreg = LogisticRegression(max_iter=500, solver='lbfgs')
     logreg.fit(X1, y1)
