@@ -792,6 +792,9 @@ def save_checkpoint_jmmd(model, save_model, model_path, sub_folder, epoch, metri
     savemat(model_path + '/' + sub_folder + '/performance/performance.mat', perform_to_save)
     
     # Plot figures === save and overwrite at checkpoints
+    if domain_weight != 0:
+        figLoss(line_list=[(metrics['nmse_val_source'], 'Source Domain'), (metrics['nmse_val_target'], 'Target Domain')], xlabel='Epoch', ylabel='NMSE',
+                    title='NMSE in Validation', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='NMSE_val')
     figLoss(line_list=[(metrics['train_est_loss'], 'GAN Generate Loss'), (metrics['train_disc_loss'], 'GAN Discriminator Loss')], xlabel='Epoch', ylabel='Loss',
                 title='Training GAN Losses', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='GAN_train')
     figLoss(line_list=[(metrics['train_loss'], 'Training'), (metrics['val_loss'], 'Validating')], xlabel='Epoch', ylabel='Total Loss',
