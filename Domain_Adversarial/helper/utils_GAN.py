@@ -969,7 +969,7 @@ def visualize_H(H_sample, H_to_save, epoch, figChan, flag, model_path, sub_folde
     # plot real parts
     # source domain
     if flag == 1:
-        figChan(H_true_sample[0,:,:,0], title='True channel', index_save=epoch+1, 
+        figChan(H_true_sample[0,:,:,0], index_save=epoch+1, 
                                 figure_save_path=model_path + '/' + sub_folder + '/H_visualize', name='H_true_source')
         figChan(H_input_sample[0,:,:,0], nmse=nmse_input_source[0], title='Raw-estimated Channel', index_save=epoch+1, 
                                 figure_save_path=model_path + '/' + sub_folder + '/H_visualize', name='H_input_source')
@@ -977,7 +977,7 @@ def visualize_H(H_sample, H_to_save, epoch, figChan, flag, model_path, sub_folde
                                 figure_save_path=model_path + '/' + sub_folder + '/H_visualize', name='H_GAN_source')
     # target domain
     if flag == 1 and domain_weight:
-        figChan(H_true_sample_target[0,:,:,0], title='True channel', index_save=epoch+1, 
+        figChan(H_true_sample_target[0,:,:,0], index_save=epoch+1, 
                                 figure_save_path=model_path + '/' + sub_folder + '/H_visualize', name='H_true_target')
         figChan(H_input_sample_target[0,:,:,0], nmse=nmse_input_target[0], title='Raw-estimated Channel', index_save=epoch+1, 
                                 figure_save_path=model_path + '/' + sub_folder + '/H_visualize', name='H_input_target')

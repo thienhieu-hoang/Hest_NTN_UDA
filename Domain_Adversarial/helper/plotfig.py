@@ -69,7 +69,8 @@ def figChan(x, nmse =None, title=None, index_save=1, figure_save_path=None, name
         plt.xticks([])
         plt.ylabel('Subcarrier')
         plt.xlabel('Symbol 2, Slot 1')
-        plt.title(title)
+        if title is not None:
+            plt.title(title)
     else:
         plt.figure(figsize=(10, 5))
         plt.imshow(x,  aspect='auto', cmap='viridis', interpolation='none')
