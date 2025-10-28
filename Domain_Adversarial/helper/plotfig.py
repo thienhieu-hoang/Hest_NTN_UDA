@@ -187,11 +187,19 @@ def plotHist(X, fig_show=True, save_path=None, name=None, percent=100):
     plt.clf()
     data = {
         'results': {
-            'phases': phases,
-            'magnitudes_clipped': magnitudes_clipped,
-            'counts': counts
+            'magnitude_bins': bins[:-1],  # Remove last bin edge
+            'magnitude_counts': counts,
+            'magnitude_bin_edges': bins,  # Full bin edges for MATLAB
+            'phases': phases if np.iscomplexobj(X_flat) else [],
+            'phase_bins': np.linspace(-np.pi, np.pi, 401) if np.iscomplexobj(X_flat) else [],  # 400 bins + 1 edge
+            'metadata': {
+                'total_samples': len(X_flat),
+                'clipped_samples': len(magnitudes_clipped),
+                'percentile_threshold': high,
+                'percent_kept': percent
+            }
         }
-    }   
+    }
     sio.savemat(save_path + f'{name}.mat', data)
         
 from scipy.stats import wasserstein_distance
