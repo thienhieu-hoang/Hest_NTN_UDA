@@ -495,6 +495,258 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
         avg_epoc_loss_d=avg_loss_d
     )
 
+def train_step_wgan_gp_source_only(model, loader_H, loss_fn, optimizers, lower_range=-1, 
+                                  save_features=False, nsymb=14, weights=None, linear_interp=False):
+    """
+    WGAN-GP training step using only source domain (no domain adaptation)
+    
+    Args:
+        model: GAN model instance with generator and discriminator
+        loader_H: tuple of (loader_H_input_train_src, loader_H_true_train_src, 
+                          loader_H_input_train_tgt, loader_H_true_train_tgt) - tgt used only for testing
+        loss_fn: tuple of loss functions (estimation_loss, bce_loss)
+        optimizers: tuple of (gen_optimizer, disc_optimizer)
+    """
+    loader_H_input_train_src, loader_H_true_train_src, \
+        loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
+    loss_fn_est, loss_fn_bce = loss_fn[:2]
+    gen_optimizer, disc_optimizer = optimizers[:2]
+    
+    adv_weight = weights.get('adv_weight', 0.01)
+    temporal_weight = weights.get('temporal_weight', 0.0)
+    frequency_weight = weights.get('frequency_weight', 0.0)
+    est_weight = weights.get('est_weight', 1.0)
+    
+    epoc_loss_g = 0.0
+    epoc_loss_d = 0.0
+    epoc_loss_est = 0.0
+    epoc_loss_est_tgt = 0.0  # For monitoring target performance
+    N_train = 0
+    
+    for batch_idx in range(loader_H_true_train_src.total_batches):
+        # --- Get SOURCE data for training ---
+        x_src = loader_H_input_train_src.next_batch()
+        y_src = loader_H_true_train_src.next_batch()
+        N_train += x_src.shape[0]
+
+        # Preprocess source data
+        x_src = complx2real(x_src)
+        y_src = complx2real(y_src)
+        x_src = np.transpose(x_src, (0, 2, 3, 1))
+        y_src = np.transpose(y_src, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = minmaxScaler(y_src, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+
+        # === 1. Train Discriminator (WGAN-GP) - Source only ===
+        with tf.GradientTape() as tape_d:
+            x_fake_src, _ = model.generator(x_scaled_src, training=True, return_features=False)
+            d_real = model.discriminator(y_scaled_src, training=True)
+            d_fake = model.discriminator(x_fake_src, training=True)
+            
+            # WGAN-GP gradient penalty
+            gp = gradient_penalty(model.discriminator, y_scaled_src, x_fake_src, batch_size=x_scaled_src.shape[0])
+            lambda_gp = 10.0
+
+            # WGAN-GP discriminator loss
+            d_loss = tf.reduce_mean(d_fake) - tf.reduce_mean(d_real) + lambda_gp * gp
+            
+            # Add L2 regularization loss from discriminator
+            if model.discriminator.losses:
+                d_loss += tf.add_n(model.discriminator.losses)
+                
+        grads_d = tape_d.gradient(d_loss, model.discriminator.trainable_variables)
+        disc_optimizer.apply_gradients(zip(grads_d, model.discriminator.trainable_variables))
+        epoc_loss_d += d_loss.numpy() * x_src.shape[0]
+
+        # === 2. Train Generator - Source only ===
+        with tf.GradientTape() as tape_g:
+            # Generate from source domain
+            x_fake_src, features_src = model.generator(x_scaled_src, training=True, return_features=True)
+            d_fake_src = model.discriminator(x_fake_src, training=False)
+            
+            # Generator losses
+            g_adv_loss = -tf.reduce_mean(d_fake_src)  # WGAN-GP adversarial loss
+            g_est_loss = loss_fn_est(y_scaled_src, x_fake_src)  # Estimation loss (source)
+            
+            # Smoothness loss (optional)
+            if temporal_weight != 0 or frequency_weight != 0:
+                smoothness_loss = compute_total_smoothness_loss(x_fake_src, temporal_weight=temporal_weight, frequency_weight=frequency_weight)
+            else:
+                smoothness_loss = 0.0
+        
+            # Total generator loss (no domain adaptation)
+            g_loss = est_weight * g_est_loss + adv_weight * g_adv_loss + smoothness_loss
+            
+            # Add L2 regularization
+            if model.generator.losses:
+                g_loss += tf.add_n(model.generator.losses)
+                
+        grads_g = tape_g.gradient(g_loss, model.generator.trainable_variables)
+        gen_optimizer.apply_gradients(zip(grads_g, model.generator.trainable_variables))
+        
+        epoc_loss_g += g_loss.numpy() * x_src.shape[0]
+        epoc_loss_est += g_est_loss.numpy() * x_src.shape[0]
+
+        # === 3. Optional: Monitor target performance (no training) ===
+        if batch_idx < loader_H_true_train_tgt.total_batches:
+            x_tgt = loader_H_input_train_tgt.next_batch()
+            y_tgt = loader_H_true_train_tgt.next_batch()
+            
+            # Preprocess target data
+            x_tgt = complx2real(x_tgt)
+            y_tgt = complx2real(y_tgt)
+            x_tgt = np.transpose(x_tgt, (0, 2, 3, 1))
+            y_tgt = np.transpose(y_tgt, (0, 2, 3, 1))
+            x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt, lower_range=lower_range, linear_interp=linear_interp)
+            y_scaled_tgt, _, _ = minmaxScaler(y_tgt, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+            
+            # Test on target (no gradients)
+            x_fake_tgt, _ = model.generator(x_scaled_tgt, training=False, return_features=False)
+            g_est_loss_tgt = loss_fn_est(y_scaled_tgt, x_fake_tgt)
+            epoc_loss_est_tgt += g_est_loss_tgt.numpy() * x_tgt.shape[0]
+
+    # Average losses
+    avg_loss_g = epoc_loss_g / N_train
+    avg_loss_d = epoc_loss_d / N_train
+    avg_loss_est = epoc_loss_est / N_train
+    avg_loss_est_tgt = epoc_loss_est_tgt / N_train if epoc_loss_est_tgt > 0 else 0.0
+    
+    # Return compatible output structure (no domain adaptation)
+    return train_step_Output(
+        avg_epoc_loss_est=avg_loss_est,
+        avg_epoc_loss_domain=0.0,  # No domain adaptation
+        avg_epoc_loss=avg_loss_g,
+        avg_epoc_loss_est_target=avg_loss_est_tgt,
+        features_source=None,
+        film_features_source=None,
+        avg_epoc_loss_d=avg_loss_d
+    )
+
+def val_step_wgan_gp_source_only(model, loader_H, loss_fn, lower_range, nsymb=14, weights=None, linear_interp=False):
+    """
+    Validation step for source-only training.
+    Validates on source domain, tests on target domain.
+    """
+    loader_H_input_val_source, loader_H_true_val_source, loader_H_input_val_target, loader_H_true_val_target = loader_H
+    loss_fn_est, loss_fn_bce = loss_fn[:2]
+    
+    adv_weight = weights.get('adv_weight', 0.01)
+    temporal_weight = weights.get('temporal_weight', 0.0)
+    frequency_weight = weights.get('frequency_weight', 0.0)
+    est_weight = weights.get('est_weight', 1.0)
+    
+    N_val_source = 0
+    N_val_target = 0
+    epoc_loss_est_source = 0.0
+    epoc_loss_est_target = 0.0  # This is now testing on target
+    epoc_nmse_val_source = 0.0
+    epoc_nmse_val_target = 0.0  # This is now testing on target
+    epoc_gan_disc_loss = 0.0
+    H_sample = []
+
+    for idx in range(loader_H_true_val_source.total_batches):
+        # --- Source domain validation ---
+        x_src = loader_H_input_val_source.next_batch()
+        y_src = loader_H_true_val_source.next_batch()
+        N_val_source += x_src.shape[0]
+
+        # Preprocess source
+        x_src_real = complx2real(x_src)
+        y_src_real = complx2real(y_src)
+        x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
+        y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = minmaxScaler(y_src_real, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+
+        # Source validation prediction
+        preds_src, _ = model.generator(x_scaled_src, training=False, return_features=False)
+        preds_src = preds_src.numpy() if hasattr(preds_src, 'numpy') else preds_src
+        preds_src_descaled = deMinMax(preds_src, x_min_src, x_max_src, lower_range=lower_range)
+        batch_est_loss_source = loss_fn_est(y_scaled_src, preds_src).numpy()
+        epoc_loss_est_source += batch_est_loss_source * x_src.shape[0]
+        
+        # Source NMSE
+        mse_val_source = np.mean((preds_src_descaled - y_src_real) ** 2, axis=(1, 2, 3))
+        power_source = np.mean(y_src_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_source += np.mean(mse_val_source / (power_source + 1e-30)) * x_src.shape[0]
+
+        # Discriminator loss (source only)
+        d_real_src = model.discriminator(y_scaled_src, training=False)
+        d_fake_src = model.discriminator(preds_src, training=False)
+        gp_src = gradient_penalty(model.discriminator, y_scaled_src, preds_src, batch_size=x_scaled_src.shape[0])
+        d_loss_src = tf.reduce_mean(d_fake_src) - tf.reduce_mean(d_real_src) + 10.0 * gp_src
+        epoc_gan_disc_loss += d_loss_src.numpy() * x_src.shape[0]
+
+    # --- Target domain testing (separate loop to handle different batch sizes) ---
+    for idx in range(loader_H_true_val_target.total_batches):
+        x_tgt = loader_H_input_val_target.next_batch()
+        y_tgt = loader_H_true_val_target.next_batch()
+        N_val_target += x_tgt.shape[0]
+
+        # Preprocess target
+        x_tgt_real = complx2real(x_tgt)
+        y_tgt_real = complx2real(y_tgt)
+        x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
+        y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
+        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_tgt, _, _ = minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+
+        # Target testing prediction
+        preds_tgt, _ = model.generator(x_scaled_tgt, training=False, return_features=False)
+        preds_tgt = preds_tgt.numpy() if hasattr(preds_tgt, 'numpy') else preds_tgt
+        preds_tgt_descaled = deMinMax(preds_tgt, x_min_tgt, x_max_tgt, lower_range=lower_range)
+        batch_est_loss_target = loss_fn_est(y_scaled_tgt, preds_tgt).numpy()
+        epoc_loss_est_target += batch_est_loss_target * x_tgt.shape[0]
+        
+        # Target NMSE
+        mse_val_target = np.mean((preds_tgt_descaled - y_tgt_real) ** 2, axis=(1, 2, 3))
+        power_target = np.mean(y_tgt_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_target += np.mean(mse_val_target / (power_target + 1e-30)) * x_tgt.shape[0]
+
+        # Save samples from first batch
+        if idx == 0:
+            n_samples = min(3, x_tgt_real.shape[0])
+            H_true_sample_target = y_tgt_real[:n_samples].copy()
+            H_input_sample_target = x_tgt_real[:n_samples].copy()
+            H_est_sample_target = preds_tgt_descaled[:n_samples].copy()
+            
+            mse_sample_target = np.mean((H_est_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            power_sample_target = np.mean(H_true_sample_target ** 2, axis=(1, 2, 3))
+            nmse_est_target = mse_sample_target / (power_sample_target + 1e-30)
+            mse_input_target = np.mean((H_input_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            nmse_input_target = mse_input_target / (power_sample_target + 1e-30)
+            
+            H_sample = [H_true_sample_target, H_input_sample_target, H_est_sample_target, 
+                       nmse_input_target, nmse_est_target]
+
+    # Calculate averages
+    avg_loss_est_source = epoc_loss_est_source / N_val_source
+    avg_loss_est_target = epoc_loss_est_target / N_val_target  # This is testing performance
+    avg_nmse_source = epoc_nmse_val_source / N_val_source
+    avg_nmse_target = epoc_nmse_val_target / N_val_target  # This is testing performance
+    avg_gan_disc_loss = epoc_gan_disc_loss / N_val_source
+
+    # Total loss (source validation only)
+    avg_total_loss = est_weight * avg_loss_est_source + adv_weight * avg_gan_disc_loss
+
+    epoc_eval_return = {
+        'avg_total_loss': avg_total_loss,
+        'avg_loss_est_source': avg_loss_est_source,
+        'avg_loss_est_target': avg_loss_est_target,  # This is testing loss
+        'avg_loss_est': avg_loss_est_source,  # Use source for validation
+        'avg_gan_disc_loss': avg_gan_disc_loss,
+        'avg_jmmd_loss': 0.0,  # No domain adaptation
+        'avg_nmse_source': avg_nmse_source,
+        'avg_nmse_target': avg_nmse_target,  # This is testing NMSE
+        'avg_nmse': avg_nmse_source,  # Use source for validation
+        'avg_domain_acc_source': 0.5,
+        'avg_domain_acc_target': 0.5,
+        'avg_domain_acc': 0.5,
+        'avg_smoothness_loss': 0.0
+    }
+
+    return H_sample, epoc_eval_return
+
 def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, weights=None, linear_interp=False):
     """
     Validation step for WGAN-GP model with JMMD. Returns H_sample and epoc_eval_return (summary metrics).
@@ -694,7 +946,277 @@ def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, weigh
 
     return H_sample, epoc_eval_return
 
-def post_val(epoc_val_return, epoch, n_epochs, val_metrics, domain_weight=True):
+def train_step_wgan_gp_source_only(model, loader_H, loss_fn, optimizers, lower_range=-1, 
+                                save_features=False, nsymb=14, weights=None, linear_interp=False):
+    """
+    WGAN-GP training step using only source domain (no domain adaptation)
+    
+    Args:
+        model: GAN model instance with generator and discriminator
+        loader_H: tuple of (loader_H_input_train_src, loader_H_true_train_src, 
+                        loader_H_input_train_tgt, loader_H_true_train_tgt) - tgt used only for testing
+        loss_fn: tuple of loss functions (estimation_loss, bce_loss)
+        optimizers: tuple of (gen_optimizer, disc_optimizer)
+    """
+    loader_H_input_train_src, loader_H_true_train_src, \
+        loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
+    loss_fn_est, loss_fn_bce = loss_fn[:2]
+    gen_optimizer, disc_optimizer = optimizers[:2]
+    
+    adv_weight = weights.get('adv_weight', 0.01)
+    temporal_weight = weights.get('temporal_weight', 0.0)
+    frequency_weight = weights.get('frequency_weight', 0.0)
+    est_weight = weights.get('est_weight', 1.0)
+    
+    epoc_loss_g = 0.0
+    epoc_loss_d = 0.0
+    epoc_loss_est = 0.0
+    epoc_loss_est_tgt = 0.0  # For monitoring target performance
+    N_train = 0
+    
+    for batch_idx in range(loader_H_true_train_src.total_batches):
+        # --- Get SOURCE data for training ---
+        x_src = loader_H_input_train_src.next_batch()
+        y_src = loader_H_true_train_src.next_batch()
+        N_train += x_src.shape[0]
+
+        # Preprocess source data
+        x_src = complx2real(x_src)
+        y_src = complx2real(y_src)
+        x_src = np.transpose(x_src, (0, 2, 3, 1))
+        y_src = np.transpose(y_src, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = minmaxScaler(y_src, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+
+        # === 1. Train Discriminator (WGAN-GP) - Source only ===
+        with tf.GradientTape() as tape_d:
+            x_fake_src, _ = model.generator(x_scaled_src, training=True, return_features=False)
+            d_real = model.discriminator(y_scaled_src, training=True)
+            d_fake = model.discriminator(x_fake_src, training=True)
+            
+            # WGAN-GP gradient penalty
+            gp = gradient_penalty(model.discriminator, y_scaled_src, x_fake_src, batch_size=x_scaled_src.shape[0])
+            lambda_gp = 10.0
+
+            # WGAN-GP discriminator loss
+            d_loss = tf.reduce_mean(d_fake) - tf.reduce_mean(d_real) + lambda_gp * gp
+            
+            # Add L2 regularization loss from discriminator
+            if model.discriminator.losses:
+                d_loss += tf.add_n(model.discriminator.losses)
+                
+        grads_d = tape_d.gradient(d_loss, model.discriminator.trainable_variables)
+        disc_optimizer.apply_gradients(zip(grads_d, model.discriminator.trainable_variables))
+        epoc_loss_d += d_loss.numpy() * x_src.shape[0]
+
+        # === 2. Train Generator - Source only ===
+        with tf.GradientTape() as tape_g:
+            # Generate from source domain
+            x_fake_src, features_src = model.generator(x_scaled_src, training=True, return_features=True)
+            d_fake_src = model.discriminator(x_fake_src, training=False)
+            
+            # Generator losses
+            g_adv_loss = -tf.reduce_mean(d_fake_src)  # WGAN-GP adversarial loss
+            g_est_loss = loss_fn_est(y_scaled_src, x_fake_src)  # Estimation loss (source)
+            
+            # Smoothness loss (optional)
+            if temporal_weight != 0 or frequency_weight != 0:
+                smoothness_loss = compute_total_smoothness_loss(x_fake_src, temporal_weight=temporal_weight, frequency_weight=frequency_weight)
+            else:
+                smoothness_loss = 0.0
+        
+            # Total generator loss (no domain adaptation)
+            g_loss = est_weight * g_est_loss + adv_weight * g_adv_loss + smoothness_loss
+            
+            # Add L2 regularization
+            if model.generator.losses:
+                g_loss += tf.add_n(model.generator.losses)
+                
+        grads_g = tape_g.gradient(g_loss, model.generator.trainable_variables)
+        gen_optimizer.apply_gradients(zip(grads_g, model.generator.trainable_variables))
+        
+        epoc_loss_g += g_loss.numpy() * x_src.shape[0]
+        epoc_loss_est += g_est_loss.numpy() * x_src.shape[0]
+
+        # === 3. Optional: Monitor target performance (no training) ===
+        if batch_idx < loader_H_true_train_tgt.total_batches:
+            x_tgt = loader_H_input_train_tgt.next_batch()
+            y_tgt = loader_H_true_train_tgt.next_batch()
+            
+            # Preprocess target data
+            x_tgt = complx2real(x_tgt)
+            y_tgt = complx2real(y_tgt)
+            x_tgt = np.transpose(x_tgt, (0, 2, 3, 1))
+            y_tgt = np.transpose(y_tgt, (0, 2, 3, 1))
+            x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt, lower_range=lower_range, linear_interp=linear_interp)
+            y_scaled_tgt, _, _ = minmaxScaler(y_tgt, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+            
+            # Test on target (no gradients)
+            x_fake_tgt, _ = model.generator(x_scaled_tgt, training=False, return_features=False)
+            g_est_loss_tgt = loss_fn_est(y_scaled_tgt, x_fake_tgt)
+            epoc_loss_est_tgt += g_est_loss_tgt.numpy() * x_tgt.shape[0]
+
+    # Average losses
+    avg_loss_g = epoc_loss_g / N_train
+    avg_loss_d = epoc_loss_d / N_train
+    avg_loss_est = epoc_loss_est / N_train
+    avg_loss_est_tgt = epoc_loss_est_tgt / N_train if epoc_loss_est_tgt > 0 else 0.0
+    
+    # Return compatible output structure (no domain adaptation)
+    return train_step_Output(
+        avg_epoc_loss_est=avg_loss_est,
+        avg_epoc_loss_domain=0.0,  # No domain adaptation
+        avg_epoc_loss=avg_loss_g,
+        avg_epoc_loss_est_target=avg_loss_est_tgt,
+        features_source=None,
+        film_features_source=None,
+        avg_epoc_loss_d=avg_loss_d
+    )
+
+def val_step_wgan_gp_source_only(model, loader_H, loss_fn, lower_range, nsymb=14, weights=None, linear_interp=False):
+    """
+    Validation step for source-only training.
+    Validates on source domain, tests on target domain.
+    """
+    loader_H_input_val_source, loader_H_true_val_source, loader_H_input_val_target, loader_H_true_val_target = loader_H
+    loss_fn_est, loss_fn_bce = loss_fn[:2]
+    
+    adv_weight = weights.get('adv_weight', 0.01)
+    temporal_weight = weights.get('temporal_weight', 0.0)
+    frequency_weight = weights.get('frequency_weight', 0.0)
+    est_weight = weights.get('est_weight', 1.0)
+    
+    N_val_source = 0
+    N_val_target = 0
+    epoc_loss_est_source = 0.0
+    epoc_loss_est_target = 0.0  # This is now testing on target
+    epoc_nmse_val_source = 0.0
+    epoc_nmse_val_target = 0.0  # This is now testing on target
+    epoc_gan_disc_loss = 0.0
+    H_sample = []
+
+    for idx in range(loader_H_true_val_source.total_batches):
+        # --- Source domain validation ---
+        x_src = loader_H_input_val_source.next_batch()
+        y_src = loader_H_true_val_source.next_batch()
+        N_val_source += x_src.shape[0]
+
+        # Preprocess source
+        x_src_real = complx2real(x_src)
+        y_src_real = complx2real(y_src)
+        x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
+        y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = minmaxScaler(y_src_real, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+
+        # Source validation prediction
+        preds_src, _ = model.generator(x_scaled_src, training=False, return_features=False)
+        preds_src = preds_src.numpy() if hasattr(preds_src, 'numpy') else preds_src
+        preds_src_descaled = deMinMax(preds_src, x_min_src, x_max_src, lower_range=lower_range)
+        batch_est_loss_source = loss_fn_est(y_scaled_src, preds_src).numpy()
+        epoc_loss_est_source += batch_est_loss_source * x_src.shape[0]
+        
+        # Source NMSE
+        mse_val_source = np.mean((preds_src_descaled - y_src_real) ** 2, axis=(1, 2, 3))
+        power_source = np.mean(y_src_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_source += np.mean(mse_val_source / (power_source + 1e-30)) * x_src.shape[0]
+
+        # Discriminator loss (source only)
+        d_real_src = model.discriminator(y_scaled_src, training=False)
+        d_fake_src = model.discriminator(preds_src, training=False)
+        gp_src = gradient_penalty(model.discriminator, y_scaled_src, preds_src, batch_size=x_scaled_src.shape[0])
+        d_loss_src = tf.reduce_mean(d_fake_src) - tf.reduce_mean(d_real_src) + 10.0 * gp_src
+        epoc_gan_disc_loss += d_loss_src.numpy() * x_src.shape[0]
+
+    # --- Target domain testing (separate loop to handle different batch sizes) ---
+    for idx in range(loader_H_true_val_target.total_batches):
+        x_tgt = loader_H_input_val_target.next_batch()
+        y_tgt = loader_H_true_val_target.next_batch()
+        N_val_target += x_tgt.shape[0]
+
+        # Preprocess target
+        x_tgt_real = complx2real(x_tgt)
+        y_tgt_real = complx2real(y_tgt)
+        x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
+        y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
+        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_tgt, _, _ = minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+
+        # Target testing prediction
+        preds_tgt, _ = model.generator(x_scaled_tgt, training=False, return_features=False)
+        preds_tgt = preds_tgt.numpy() if hasattr(preds_tgt, 'numpy') else preds_tgt
+        preds_tgt_descaled = deMinMax(preds_tgt, x_min_tgt, x_max_tgt, lower_range=lower_range)
+        batch_est_loss_target = loss_fn_est(y_scaled_tgt, preds_tgt).numpy()
+        epoc_loss_est_target += batch_est_loss_target * x_tgt.shape[0]
+        
+        # Target NMSE
+        mse_val_target = np.mean((preds_tgt_descaled - y_tgt_real) ** 2, axis=(1, 2, 3))
+        power_target = np.mean(y_tgt_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_target += np.mean(mse_val_target / (power_target + 1e-30)) * x_tgt.shape[0]
+
+        # Save samples from first batch
+        if idx == 0:
+            n_samples = min(3, x_tgt_real.shape[0])
+            #source 
+            H_true_sample = y_src_real[:n_samples].copy()
+            H_input_sample = x_src_real[:n_samples].copy()
+            H_est_sample = preds_src_descaled[:n_samples].numpy().copy()
+            mse_sample_source = np.mean((H_est_sample - H_true_sample) ** 2, axis=(1, 2, 3))
+            power_sample_source = np.mean(H_true_sample ** 2, axis=(1, 2, 3))
+            nmse_est_source = mse_sample_source / (power_sample_source + 1e-30)
+            mse_input_source = np.mean((H_input_sample - H_true_sample) ** 2, axis=(1, 2, 3))
+            nmse_input_source = mse_input_source / (power_sample_source + 1e-30)
+            # target
+            H_true_sample_target = y_tgt_real[:n_samples].copy()
+            H_input_sample_target = x_tgt_real[:n_samples].copy()
+            if hasattr(preds_tgt_descaled, 'numpy'):
+                H_est_sample_target = preds_tgt_descaled[:n_samples].numpy().copy()
+            else:
+                H_est_sample_target = preds_tgt_descaled[:n_samples].copy()
+            
+            mse_sample_target = np.mean((H_est_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            power_sample_target = np.mean(H_true_sample_target ** 2, axis=(1, 2, 3))
+            nmse_est_target = mse_sample_target / (power_sample_target + 1e-30)
+            mse_input_target = np.mean((H_input_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            nmse_input_target = mse_input_target / (power_sample_target + 1e-30)
+            
+            H_sample = [H_true_sample_target, H_input_sample_target, H_est_sample_target, 
+                        nmse_input_target, nmse_est_target]
+            H_sample = [H_true_sample,  H_input_sample, H_est_sample, 
+                            nmse_input_source, nmse_est_source,
+                            H_true_sample_target, H_input_sample_target, H_est_sample_target,
+                            nmse_input_target, nmse_est_target]
+
+    # Calculate averages
+    avg_loss_est_source = epoc_loss_est_source / N_val_source
+    avg_loss_est_target = epoc_loss_est_target / N_val_target  # This is testing performance
+    avg_nmse_source = epoc_nmse_val_source / N_val_source
+    avg_nmse_target = epoc_nmse_val_target / N_val_target  # This is testing performance
+    avg_gan_disc_loss = epoc_gan_disc_loss / N_val_source
+
+    # Total loss (source validation only)
+    avg_total_loss = est_weight * avg_loss_est_source + adv_weight * avg_gan_disc_loss
+
+    epoc_eval_return = {
+        'avg_total_loss': avg_total_loss,
+        'avg_loss_est_source': avg_loss_est_source,
+        'avg_loss_est_target': avg_loss_est_target,  # This is testing loss
+        'avg_loss_est': avg_loss_est_source,  # Use source for validation
+        'avg_gan_disc_loss': avg_gan_disc_loss,
+        'avg_jmmd_loss': 0.0,  # No domain adaptation
+        'avg_nmse_source': avg_nmse_source,
+        'avg_nmse_target': avg_nmse_target,  # This is testing NMSE
+        'avg_nmse': avg_nmse_source,  # Use source for validation
+        'avg_domain_acc_source': 0.5,
+        'avg_domain_acc_target': 0.5,
+        'avg_domain_acc': 0.5,
+        'avg_smoothness_loss': 0.0
+    }
+
+    return H_sample, epoc_eval_return
+
+
+def post_val(epoc_val_return, epoch, n_epochs, val_metrics, domain_weight=None):
     """
     Updated post_val function that works with validation metrics dictionary
     
@@ -715,14 +1237,14 @@ def post_val(epoc_val_return, epoch, n_epochs, val_metrics, domain_weight=True):
     val_metrics['val_est_loss_source'].append(epoc_val_return['avg_loss_est_source'])
     print(f"epoch {epoch+1}/{n_epochs} (Val) Average Estimation Loss (Source): {epoc_val_return['avg_loss_est_source']:.6f}")
     
-    if domain_weight:
-        val_metrics['val_est_loss_target'].append(epoc_val_return['avg_loss_est_target'])
-        print(f"epoch {epoch+1}/{n_epochs} (Val) Average Estimation Loss (Target): {epoc_val_return['avg_loss_est_target']:.6f}")
+
+    val_metrics['val_est_loss_target'].append(epoc_val_return['avg_loss_est_target'])
+    print(f"epoch {epoch+1}/{n_epochs} (Val) Average Estimation Loss (Target): {epoc_val_return['avg_loss_est_target']:.6f}")
     
     val_metrics['val_gan_disc_loss'].append(epoc_val_return['avg_gan_disc_loss'])
     print(f"epoch {epoch+1}/{n_epochs} (Val) GAN Discriminator Loss: {epoc_val_return['avg_gan_disc_loss']:.6f}")
     
-    if domain_weight:
+    if domain_weight!=0:
         val_metrics['val_domain_disc_loss'].append(epoc_val_return['avg_jmmd_loss'])
         print(f"epoch {epoch+1}/{n_epochs} (Val) JMMD Loss: {epoc_val_return['avg_jmmd_loss']:.6f}")
     
@@ -792,9 +1314,13 @@ def save_checkpoint_jmmd(model, save_model, model_path, sub_folder, epoch, metri
     savemat(model_path + '/' + sub_folder + '/performance/performance.mat', perform_to_save)
     
     # Plot figures === save and overwrite at checkpoints
-    if domain_weight != 0:
-        figLoss(line_list=[(metrics['nmse_val_source'], 'Source Domain'), (metrics['nmse_val_target'], 'Target Domain')], xlabel='Epoch', ylabel='NMSE',
-                    title='NMSE in Validation', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='NMSE_val')
+    figLoss(line_list=[(metrics['nmse_val_source'], 'Source Domain'), (metrics['nmse_val_target'], 'Target Domain')], xlabel='Epoch', ylabel='NMSE',
+                title='NMSE in Validation', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='NMSE_val')
+
+    figLoss(line_list=[(metrics['train_est_loss'], 'Train Loss - Source'), (metrics['val_est_loss_source'], 'Val Loss - Source'), (metrics['val_est_loss_target'], 'Val Loss - Target')], 
+                xlabel='Epoch', ylabel='Loss',
+                title='Estimation Losses', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='GAN_train')
+    
     figLoss(line_list=[(metrics['train_est_loss'], 'GAN Generate Loss'), (metrics['train_disc_loss'], 'GAN Discriminator Loss')], xlabel='Epoch', ylabel='Loss',
                 title='Training GAN Losses', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='GAN_train')
     figLoss(line_list=[(metrics['train_loss'], 'Training'), (metrics['val_loss'], 'Validating')], xlabel='Epoch', ylabel='Total Loss',
@@ -803,5 +1329,6 @@ def save_checkpoint_jmmd(model, save_model, model_path, sub_folder, epoch, metri
                             (metrics['val_est_loss_source'], 'Validating-Source'), (metrics['val_est_loss_target'], 'Validating-Target')], xlabel='Epoch', ylabel='Estimation Loss',
                 title='Training and Validating Estimation Loss', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Loss_est')
         # estimation loss: MSE loss, before de-scale
-    figLoss(line_list=[(metrics['train_domain_loss'], 'Training'), (metrics['val_domain_disc_loss'], 'Validating')], xlabel='Epoch', ylabel='Domain Discrimination Loss',
+    if domain_weight!=0:
+        figLoss(line_list=[(metrics['train_domain_loss'], 'Training'), (metrics['val_domain_disc_loss'], 'Validating')], xlabel='Epoch', ylabel='Domain Discrimination Loss',
                 title='Training and Validating Domain Discrimination Loss', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Loss_domain')
