@@ -36,8 +36,8 @@ from JMMD.helper.utils_GAN import save_checkpoint_jmmd as save_checkpoint
 
 SNR = -5
 # source_data_file_path_label = os.path.abspath(os.path.join(code_dir, '..', 'generatedChan', 'OpenNTN','H_perfect.mat'))
-source_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_A', f'SNR_{SNR}dB', 'matlabNTN.mat'))
-target_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_C', f'SNR_{SNR}dB', 'matlabNTN.mat'))
+source_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_A_30', f'SNR_{SNR}dB', 'matlabNTN.mat'))
+target_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_C_30', f'SNR_{SNR}dB', 'matlabNTN.mat'))
 norm_approach = 'minmax' # can be set to 'std'
 lower_range = -1 
     # if norm_approach = 'minmax': 
@@ -48,7 +48,7 @@ weights = {
     # Core loss weights
     'adv_weight': 0.005,        # GAN adversarial loss weight
     'est_weight': 1.0,          # Estimation loss weight (main task)
-    'domain_weight': None, # No domain_weight since we're not doing domain adaptation
+    'domain_weight': 0.0,      # No domain_weight since we're not doing domain adaptation
     
     # Smoothness regularization weights
     'temporal_weight': 0.02,    # Temporal smoothness penalty
@@ -64,10 +64,12 @@ elif norm_approach == 'no':
     norm_txt = 'No'
     
 # Paths to save
-idx_save_path = loader.find_incremental_filename(project_root + '/JMMD/model/GAN','ver', '_', '')
+path_temp = project_root + f'/JMMD/model/GAN_onlySource/{SNR}_dB/'
+os.makedirs(os.path.dirname(path_temp), exist_ok=True)
+idx_save_path = loader.find_incremental_filename(path_temp,'ver', '_', '')
 
-save_model = 1
-model_path = project_root + '/JMMD/model/GAN/ver' + str(idx_save_path) + '_'
+save_model = False
+model_path = project_root + f'/JMMD/model/GAN_onlySource/{SNR}_dB/ver' + str(idx_save_path) + '_'
 # figure_path = code_dir + '/model/GAN/ver' + str(idx_save_path) + '_/figure'
 model_readme = model_path + '/readme.txt'
 
@@ -155,15 +157,14 @@ from JMMD.helper.utils_GAN import train_step_wgan_gp_source_only, val_step_wgan_
 import time
 start = time.perf_counter()
 
-n_epochs= 5
+# n_epochs= 300
+# epoch_min = 50
+# epoch_step = 50
+n_epochs= 3
 epoch_min = 0
 epoch_step = 1
-# n_epochs= 3
-# epoch_min = 0
-# epoch_step = 1
 
-sub_folder_ = ['GAN_practical']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
-
+sub_folder_ = ['GAN_linear']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
 
 for sub_folder in sub_folder_:
     print(f"Processing: {sub_folder}")
@@ -306,6 +307,38 @@ for sub_folder in sub_folder_:
         print("Time", time.perf_counter() - start, "seconds")
         # Note: No PAD calculation for source-only training since we're not doing domain adaptation
             
+        # Calculate PAD for the extracted features
+        if return_features:
+            features_source_file = "features_source.h5"
+            features_target_file = "features_target.h5"
+            print(f"epoch {epoch+1}/{n_epochs}")
+            ## Calculate PCA_PAD for extracted features with PCA_SVM, PCA_LDA, PCA_LogReg
+            X_features, y_features = PAD.extract_features_with_pca(features_source_file, features_target_file, pca_components=100)
+            pad_svm_epoc = PAD.calc_pad_svm(X_features, y_features)
+            pad_lda_epoc = PAD.calc_pad_lda(X_features, y_features)
+            pad_logreg_epoc = PAD.calc_pad_logreg(X_features, y_features)
+            pad_metrics['pad_pca_svm'][f'epoch_{epoch+1}'] = pad_svm_epoc
+            pad_metrics['pad_pca_lda'][f'epoch_{epoch+1}'] = pad_lda_epoc
+            pad_metrics['pad_pca_logreg'][f'epoch_{epoch+1}'] = pad_logreg_epoc
+            
+            ## Distribution of extracted features
+            plotfig.plotHist(features_source_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'source_epoch_{epoch+1}', percent=99)
+            plotfig.plotHist(features_target_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'target_epoch_{epoch+1}', percent=99)
+            #
+            plotfig.plotHist(features_source_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'source_epoch_{epoch+1}', percent=100)
+            plotfig.plotHist(features_target_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'target_epoch_{epoch+1}', percent=100)
+            #
+            # Calculate Wasserstein-1 distance for extracted features
+            # print("Calculating Wasserstein-1 distance for extracted features ...")
+            # w_dist_epoc = plotfig.wasserstein_approximate(features_source_file, features_target_file)
+            # w_dist.append(w_dist_epoc)
+            
+
+            if os.path.exists(features_source_file):
+                os.remove(features_source_file)
+            if os.path.exists(features_target_file):
+                os.remove(features_target_file)
+            print("Time", time.perf_counter() - start, "seconds")
         
         # Average loss for the epoch
         train_metrics['train_loss'].append(train_epoc_loss)
@@ -371,6 +404,3 @@ for sub_folder in sub_folder_:
     # Save performances
     # Save H matrix
     savemat(model_path + '/' + sub_folder + '/H_visualize/H_trix.mat', H_to_save)
-
-# end of trainmode   
-    

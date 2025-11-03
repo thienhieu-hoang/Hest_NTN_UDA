@@ -139,7 +139,7 @@ class Pix2PixGenerator(tf.keras.Model):
         self.last = tf.keras.layers.Conv2DTranspose(output_channels, kernel_size=(4,3), strides=(2,1), padding='valid',
                                                     activation='tanh', kernel_regularizer=kernel_regularizer)
             
-    def call(self, x, training=False, return_features=False):
+    def call(self, x, training=False, return_features=False): # return_features=False to just get the bottleneck layer features, 
         # Encoder
         d1 = self.down1(x, training=training)      # (batch, 395, 12, C_out)
         d2 = self.down2(d1, training=training)     # (batch, 196, 10, C_out)
@@ -522,6 +522,19 @@ def train_step_wgan_gp_source_only(model, loader_H, loss_fn, optimizers, lower_r
     epoc_loss_est = 0.0
     epoc_loss_est_tgt = 0.0  # For monitoring target performance
     N_train = 0
+    
+    if save_features:
+        features_h5_path_source = 'features_source.h5'
+        if os.path.exists(features_h5_path_source):
+            os.remove(features_h5_path_source)  # Remove if exists to start fresh
+        features_h5_source = h5py.File(features_h5_path_source, 'w')
+        features_dataset_source = None  # Will be created after first batch
+
+        features_h5_path_target = 'features_target.h5'
+        if os.path.exists(features_h5_path_target):
+            os.remove(features_h5_path_target)  # Remove if exists to start fresh   
+        features_h5_target = h5py.File(features_h5_path_target, 'w')
+        features_dataset_target = None  # Will be created after first batch
     
     for batch_idx in range(loader_H_true_train_src.total_batches):
         # --- Get SOURCE data for training ---
@@ -957,6 +970,7 @@ def train_step_wgan_gp_source_only(model, loader_H, loss_fn, optimizers, lower_r
                         loader_H_input_train_tgt, loader_H_true_train_tgt) - tgt used only for testing
         loss_fn: tuple of loss functions (estimation_loss, bce_loss)
         optimizers: tuple of (gen_optimizer, disc_optimizer)
+        save_features: bool, whether to save features for PAD computation
     """
     loader_H_input_train_src, loader_H_true_train_src, \
         loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
@@ -973,6 +987,19 @@ def train_step_wgan_gp_source_only(model, loader_H, loss_fn, optimizers, lower_r
     epoc_loss_est = 0.0
     epoc_loss_est_tgt = 0.0  # For monitoring target performance
     N_train = 0
+    
+    if save_features:
+        features_h5_path_source = 'features_source.h5'
+        if os.path.exists(features_h5_path_source):
+            os.remove(features_h5_path_source)  # Remove if exists to start fresh
+        features_h5_source = h5py.File(features_h5_path_source, 'w')
+        features_dataset_source = None  # Will be created after first batch
+
+        features_h5_path_target = 'features_target.h5'
+        if os.path.exists(features_h5_path_target):
+            os.remove(features_h5_path_target)  # Remove if exists to start fresh   
+        features_h5_target = h5py.File(features_h5_path_target, 'w')
+        features_dataset_target = None  # Will be created after first batch
     
     for batch_idx in range(loader_H_true_train_src.total_batches):
         # --- Get SOURCE data for training ---
@@ -1004,7 +1031,7 @@ def train_step_wgan_gp_source_only(model, loader_H, loss_fn, optimizers, lower_r
             # Add L2 regularization loss from discriminator
             if model.discriminator.losses:
                 d_loss += tf.add_n(model.discriminator.losses)
-                
+        
         grads_d = tape_d.gradient(d_loss, model.discriminator.trainable_variables)
         disc_optimizer.apply_gradients(zip(grads_d, model.discriminator.trainable_variables))
         epoc_loss_d += d_loss.numpy() * x_src.shape[0]
@@ -1012,7 +1039,7 @@ def train_step_wgan_gp_source_only(model, loader_H, loss_fn, optimizers, lower_r
         # === 2. Train Generator - Source only ===
         with tf.GradientTape() as tape_g:
             # Generate from source domain
-            x_fake_src, features_src = model.generator(x_scaled_src, training=True, return_features=True)
+            x_fake_src, features_src = model.generator(x_scaled_src, training=True, return_features=False) 
             d_fake_src = model.discriminator(x_fake_src, training=False)
             
             # Generator losses
@@ -1038,7 +1065,7 @@ def train_step_wgan_gp_source_only(model, loader_H, loss_fn, optimizers, lower_r
         epoc_loss_g += g_loss.numpy() * x_src.shape[0]
         epoc_loss_est += g_est_loss.numpy() * x_src.shape[0]
 
-        # === 3. Optional: Monitor target performance (no training) ===
+        # === 3.1. Optional: Monitor target performance (no training) ===
         if batch_idx < loader_H_true_train_tgt.total_batches:
             x_tgt = loader_H_input_train_tgt.next_batch()
             y_tgt = loader_H_true_train_tgt.next_batch()
@@ -1052,9 +1079,42 @@ def train_step_wgan_gp_source_only(model, loader_H, loss_fn, optimizers, lower_r
             y_scaled_tgt, _, _ = minmaxScaler(y_tgt, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
             
             # Test on target (no gradients)
-            x_fake_tgt, _ = model.generator(x_scaled_tgt, training=False, return_features=False)
+            x_fake_tgt, features_tgt = model.generator(x_scaled_tgt, training=False, return_features=False)
             g_est_loss_tgt = loss_fn_est(y_scaled_tgt, x_fake_tgt)
             epoc_loss_est_tgt += g_est_loss_tgt.numpy() * x_tgt.shape[0]
+        
+        # === 3.2 Save features (after the bottleneck layer) if required (to calcu PAD) ===
+        if save_features:
+            # save features in a temporary file instead of stacking them up, to avoid memory exploding
+            features_np_source = features_src[-1].numpy()  # Convert to numpy if it's a tensor
+            # print('Feature shape: ', features_np_source.shape)
+            if features_dataset_source is None:
+                # Create dataset with unlimited first dimension
+                features_dataset_source = features_h5_source.create_dataset(
+                    'features',
+                    data=features_np_source,
+                    maxshape=(None,) + features_np_source.shape[1:],
+                    chunks=True
+                )
+            else:
+                # Resize and append
+                features_dataset_source.resize(features_dataset_source.shape[0] + features_np_source.shape[0], axis=0)
+                features_dataset_source[-features_np_source.shape[0]:] = features_np_source
+                
+            features_np_target = features_tgt[-1].numpy()
+            if features_dataset_target is None:
+                # Create dataset with unlimited first dimension
+                features_dataset_target = features_h5_target.create_dataset(
+                    'features',
+                    data=features_np_target,
+                    maxshape=(None,) + features_np_target.shape[1:],
+                    chunks=True
+                )
+            else:
+                # Resize and append
+                features_dataset_target.resize(features_dataset_target.shape[0] + features_np_target.shape[0], axis=0)
+                features_dataset_target[-features_np_target.shape[0]:] = features_np_target
+                        
 
     # Average losses
     avg_loss_g = epoc_loss_g / N_train
