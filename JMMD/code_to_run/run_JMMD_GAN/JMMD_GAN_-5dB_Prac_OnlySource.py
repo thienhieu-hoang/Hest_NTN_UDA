@@ -117,10 +117,10 @@ indices_target = np.resize(indices_target, N_samp)
 # indices_val_target   = indices_target[train_size:train_size + val_size]
 
 # to test code
-indices_train_source = indices_source[:96]
-indices_val_source = indices_source[2032:]
-indices_train_target = indices_target[:96]
-indices_val_target = indices_target[2032:]
+indices_train_source = indices_source[:128]
+indices_val_source = indices_source[2000:]
+indices_train_target = indices_target[:128]
+indices_val_target = indices_target[2000:]
 
 print('train_size = ', indices_train_source.shape[0])
 print('val_size = ', indices_val_source.shape[0])
