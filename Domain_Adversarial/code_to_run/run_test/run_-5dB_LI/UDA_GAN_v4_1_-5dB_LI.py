@@ -1,4 +1,5 @@
 import tensorflow as tf
+print(f"TensorFlow version: {tf.__version__}")
 
 import os
 import sys
@@ -36,8 +37,8 @@ import plotfig
 SNR = -5
 # source_data_file_path_label = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'OpenNTN','H_perfect.mat'))
 # target_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'OpenNTN', f'SNR_{SNR}dB','sionnaNTN.mat'))
-target_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'MATLAB', 'TDL_C', f'SNR_{SNR}dB','matlabNTN.mat'))
-source_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'MATLAB', 'TDL_A', f'SNR_{SNR}dB','matlabNTN.mat'))
+target_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'MATLAB', 'TDL_B100_300', f'SNR_{SNR}dB','matlabNTN.mat'))
+source_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'MATLAB', 'TDL_A300', f'SNR_{SNR}dB','matlabNTN.mat'))
 
 norm_approach = 'minmax' # can be set to 'std'
 lower_range = -1 
@@ -152,10 +153,10 @@ loss_fn_domain = tf.keras.losses.BinaryCrossentropy()  # Domain classification l
 
 load_checkpoint = False  # True if continue training
 if load_checkpoint:
-    # model_path = notebook_dir + '/model/GAN_calcu/ver' + str(idx_save_path-1) + '_' # or replace idx_save_path-1 by the desired folder index
-    model_path = notebook_dir + f'/model/GAN_calcu/{SNR}_dB/ver' + str(idx_save_path-1) + '_'
+    # model_path = notebook_dir + '/model/GAN_cal/ver' + str(idx_save_path-1) + '_' # or replace idx_save_path-1 by the desired folder index
+    model_path = notebook_dir + f'/model/GAN_cal/{SNR}_dB/ver' + str(idx_save_path-1) + '_'
 else:
-    model_path = notebook_dir + f'/model/GAN_calcu/{SNR}_dB/ver' + str(idx_save_path) + '_'
+    model_path = notebook_dir + f'/model/GAN_cal/{SNR}_dB/ver' + str(idx_save_path) + '_'
 if load_checkpoint:
     start_epoch = 3  # This is the epoch we want to CONTINUE FROM (not load from)
 else:
