@@ -37,8 +37,8 @@ import plotfig
 SNR = -5
 # source_data_file_path_label = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'OpenNTN','H_perfect.mat'))
 # target_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'OpenNTN', f'SNR_{SNR}dB','sionnaNTN.mat'))
-target_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'MATLAB', 'TDL_B_100_300_simple', f'SNR_{SNR}dB','matlabNTN.mat'))
-source_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'MATLAB', 'TDL_A_300_simple', f'SNR_{SNR}dB','matlabNTN.mat'))
+target_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'MATLAB', 'TDL_B_100_300_sim', f'SNR_{SNR}dB','matlabNTN.mat'))
+source_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'MATLAB', 'TDL_A_300_sim', f'SNR_{SNR}dB','matlabNTN.mat'))
 
 norm_approach = 'minmax' # can be set to 'std'
 lower_range = -1 
