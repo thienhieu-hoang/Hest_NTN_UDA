@@ -760,7 +760,8 @@ def val_step_wgan_gp_source_only(model, loader_H, loss_fn, lower_range, nsymb=14
 
     return H_sample, epoc_eval_return
 
-def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, weights=None, linear_interp=False):
+def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, weights=None, 
+                        linear_interp=False, return_H_gen=False):
     """
     Validation step for WGAN-GP model with JMMD. Returns H_sample and epoc_eval_return (summary metrics).
     
@@ -799,6 +800,9 @@ def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, weigh
     epoc_jmmd_loss = 0.0  # Replace domain loss with JMMD
     epoc_smoothness_loss = 0.0
     H_sample = []
+    if return_H_gen:
+        all_H_gen_src = []
+        all_H_gen_tgt = []
 
     for idx in range(loader_H_true_val_source.total_batches):
         # --- Source domain ---
@@ -913,6 +917,21 @@ def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, weigh
             nmse_input_target = mse_input_target / (power_sample_target + 1e-30)
             H_sample = [H_true_sample, H_input_sample, H_est_sample, nmse_input_source, nmse_est_source,
                         H_true_sample_target, H_input_sample_target, H_est_sample_target, nmse_input_target, nmse_est_target]
+        if return_H_gen:
+            # Convert to numpy if needed and append to lists
+            H_gen_src_batch = preds_src_descaled.numpy().copy() if hasattr(preds_src_descaled, 'numpy') else preds_src_descaled.copy()
+            H_gen_tgt_batch = preds_tgt_descaled.numpy().copy() if hasattr(preds_tgt_descaled, 'numpy') else preds_tgt_descaled.copy()
+            
+            all_H_gen_src.append(H_gen_src_batch)
+            all_H_gen_tgt.append(H_gen_tgt_batch)
+    if return_H_gen:
+        # Concatenate all batches along the batch dimension (axis=0)
+        H_gen_src_all = np.concatenate(all_H_gen_src, axis=0)
+        H_gen_tgt_all = np.concatenate(all_H_gen_tgt, axis=0)
+        H_gen = {
+            'H_gen_src': H_gen_src_all,
+            'H_gen_tgt': H_gen_tgt_all
+        }
 
     # Calculate averages
     N_val = N_val_source + N_val_target
@@ -957,6 +976,8 @@ def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, weigh
         'avg_smoothness_loss': avg_smoothness_loss
     }
 
+    if return_H_gen:
+        return H_sample, epoc_eval_return, H_gen
     return H_sample, epoc_eval_return
 
 def train_step_wgan_gp_source_only(model, loader_H, loss_fn, optimizers, lower_range=-1, 

@@ -180,8 +180,8 @@ pad_pca_lda = []
 pad_pca_logreg = []
 pad_pca_svm = []
 linear_interp = False
-if sub_folder == 'GAN_linear':
-    linear_interp =True # flag to clip values that go beyond the estimated pilot (min, max)
+# if sub_folder == 'GAN_linear':
+#     linear_interp =True # flag to clip values that go beyond the estimated pilot (min, max)
 ##
 loader_H_true_train_source = class_dict_source[sub_folder].true_train
 loader_H_input_train_source = class_dict_source[sub_folder].input_train

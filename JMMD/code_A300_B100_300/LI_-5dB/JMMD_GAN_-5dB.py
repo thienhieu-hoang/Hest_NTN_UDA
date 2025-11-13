@@ -26,8 +26,8 @@ from JMMD.helper.utils_GAN import save_checkpoint_jmmd as save_checkpoint
 
 SNR = -5
 # source_data_file_path_label = os.path.abspath(os.path.join(code_dir, '..', 'generatedChan', 'OpenNTN','H_perfect.mat'))
-source_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_D_20', f'SNR_{SNR}dB', 'matlabNTN.mat'))
-target_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_A_300', f'SNR_{SNR}dB', 'matlabNTN.mat'))
+source_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_A_300_simple', f'SNR_{SNR}dB', 'matlabNTN.mat'))
+target_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_B_100_300_simple', f'SNR_{SNR}dB', 'matlabNTN.mat'))
 norm_approach = 'minmax' # can be set to 'std'
 lower_range = -1 
     # if norm_approach = 'minmax': 
@@ -54,12 +54,12 @@ elif norm_approach == 'no':
     norm_txt = 'No'
     
 # Paths to save
-path_temp = project_root + f'/JMMD/model/GAN_calcu/{SNR}_dB/'
+path_temp = project_root + f'/JMMD/model/GAN_cal/{SNR}_dB/'
 os.makedirs(os.path.dirname(path_temp), exist_ok=True)
 idx_save_path = loader.find_incremental_filename(path_temp,'ver', '_', '')
 
 save_model = False
-model_path = project_root + f'/JMMD/model/GAN_calcu/{SNR}_dB/ver' + str(idx_save_path) + '_'
+model_path = project_root + f'/JMMD/model/GAN_cal/{SNR}_dB/ver' + str(idx_save_path) + '_'
 # figure_path = code_dir + '/model/GAN/ver' + str(idx_save_path) + '_/figure'
 model_readme = model_path + '/readme.txt'
 
@@ -100,17 +100,17 @@ indices_target = np.resize(indices_target, N_samp)
 
 # =======================================================
 ## Divide the indices into training and validation sets
-indices_train_source = indices_source[:train_size]
-indices_val_source   = indices_source[train_size:train_size + val_size]
+# indices_train_source = indices_source[:train_size]
+# indices_val_source   = indices_source[train_size:train_size + val_size]
 
-indices_train_target = indices_target[:train_size]
-indices_val_target   = indices_target[train_size:train_size + val_size]
+# indices_train_target = indices_target[:train_size]
+# indices_val_target   = indices_target[train_size:train_size + val_size]
 
 # to test code
-# indices_train_source = indices_source[:96]
-# indices_val_source = indices_source[2032:]
-# indices_train_target = indices_target[:96]
-# indices_val_target = indices_target[2032:]
+indices_train_source = indices_source[:96]
+indices_val_source = indices_source[2032:]
+indices_train_target = indices_target[:96]
+indices_val_target = indices_target[2032:]
 
 print('train_size = ', indices_train_source.shape[0])
 print('val_size = ', indices_val_source.shape[0])
@@ -147,12 +147,12 @@ from JMMD.helper.utils_GAN import train_step_wgan_gp_jmmd, val_step_wgan_gp_jmmd
 import time
 start = time.perf_counter()
 
-n_epochs= 300
-epoch_min = 20
-epoch_step = 20
-# n_epochs= 3
-# epoch_min = 0
-# epoch_step = 1
+# n_epochs= 300
+# epoch_min = 20
+# epoch_step = 20
+n_epochs= 3
+epoch_min = 0
+epoch_step = 1
 
 sub_folder_ = ['GAN_linear']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
 
@@ -166,8 +166,8 @@ for sub_folder in sub_folder_:
         'w_dist': {}            # Dictionary to store Wasserstein distances by epoch
     }
     linear_interp = False
-    if sub_folder == 'GAN_linear':
-        linear_interp =True # flag to clip values that go beyond the estimated pilot (min, max)
+    # if sub_folder == 'GAN_linear':
+    #     linear_interp =True # flag to clip values that go beyond the estimated pilot (min, max)
     ##
     loader_H_true_train_source = class_dict_source[sub_folder].true_train
     loader_H_input_train_source = class_dict_source[sub_folder].input_train
@@ -358,13 +358,15 @@ for sub_folder in sub_folder_:
         loss_fn = [loss_fn_ce, loss_fn_bce]
         
         # eval_func = utils_UDA_FiLM.val_step
-        if (epoch==epoch_min) or (epoch+1>epoch_min and (epoch-epoch_min)%epoch_step==0) or epoch==n_epochs-1:
+        if (epoch==epoch_min) or (epoch+1>epoch_min and (epoch-epoch_min)%epoch_step==0) and epoch!=n_epochs-1:
             # 
             H_sample, epoc_val_return = val_step_wgan_gp_jmmd(model, loader_H_eval, loss_fn, lower_range, 
                                             weights=weights, linear_interp=linear_interp)
             visualize_H(H_sample, H_to_save, epoch, plotfig.figChan, flag, model_path, sub_folder, domain_weight=weights['domain_weight'])
             flag = 0  # after the first epoch, no need to save H_true anymore
-            
+        elif epoch==n_epochs-1:
+            _, epoc_val_return, H_val_gen = val_step_wgan_gp_jmmd(model, loader_H_eval, loss_fn, lower_range, 
+                                            weights=weights, linear_interp=linear_interp, return_H_gen=True)    
         else:
             # 
             _, epoc_val_return = val_step_wgan_gp_jmmd(model, loader_H_eval, loss_fn, lower_range, 
@@ -394,6 +396,9 @@ for sub_folder in sub_folder_:
     # Save performances
     # Save H matrix
     savemat(model_path + '/' + sub_folder + '/H_visualize/H_trix.mat', H_to_save)
-
-# end of trainmode   
+    savemat(model_path + '/' + sub_folder + '/H_visualize/H_val_generated.mat', 
+        {'H_val_gen': H_val_gen,
+        'indices_val_source': indices_val_source,
+        'indices_val_target': indices_val_target})
+# end of trainmode   (for sub_folder loop)
     
