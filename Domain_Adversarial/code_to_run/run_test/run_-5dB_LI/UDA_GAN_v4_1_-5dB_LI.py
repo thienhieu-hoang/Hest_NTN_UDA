@@ -37,8 +37,8 @@ import plotfig
 SNR = -5
 # source_data_file_path_label = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'OpenNTN','H_perfect.mat'))
 # target_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'OpenNTN', f'SNR_{SNR}dB','sionnaNTN.mat'))
-target_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'MATLAB', 'TDL_B100_300', f'SNR_{SNR}dB','matlabNTN.mat'))
-source_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'MATLAB', 'TDL_A300', f'SNR_{SNR}dB','matlabNTN.mat'))
+target_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'MATLAB', 'TDL_B_100_300_simple', f'SNR_{SNR}dB','matlabNTN.mat'))
+source_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'MATLAB', 'TDL_A_300_simple', f'SNR_{SNR}dB','matlabNTN.mat'))
 
 norm_approach = 'minmax' # can be set to 'std'
 lower_range = -1 
@@ -389,9 +389,9 @@ for epoch in range(n_epochs):
         plotfig.plotHist(features_source_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'source_epoch_{epoch+1}', percent=90)
         plotfig.plotHist(features_target_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'target_epoch_{epoch+1}', percent=90)
         # Calculate Wasserstein-1 distance for extracted features
-        print("Calculating Wasserstein-1 distance for extracted features ...")
-        w_dist_epoc = plotfig.wasserstein_approximate(features_source_file, features_target_file)
-        w_dist.append(w_dist_epoc)
+        # print("Calculating Wasserstein-1 distance for extracted features ...")
+        # w_dist_epoc = plotfig.wasserstein_approximate(features_source_file, features_target_file)
+        # w_dist.append(w_dist_epoc)
         
 
         if os.path.exists(features_source_file):
@@ -428,11 +428,16 @@ for epoch in range(n_epochs):
     loss_fn = [loss_fn_ce, loss_fn_bce, loss_fn_domain]
     
     # eval_func = utils_UDA_FiLM.val_step
-    if (epoch==epoch_min) or (epoch+1>epoch_min and (epoch-epoch_min)%epoch_step==0) or epoch==n_epochs-1:
+    if (epoch==epoch_min) or (epoch+1>epoch_min and (epoch-epoch_min)%epoch_step==0):
         H_sample, epoc_val_return = utils_GAN.val_step_wgan_gp(model, model_domain, loader_H_eval, loss_fn, lower_range, 
                                         adv_weight=adv_weight, est_weight=est_weight, domain_weight=domain_weight, linear_interp=linear_interp)
         utils_GAN.visualize_H(H_sample, H_to_save, epoch, plotfig.figChan, flag, model_path, sub_folder, domain_weight=domain_weight)
         flag = 0  # after the first epoch, no need to save H_true anymore
+
+    elif epoch==n_epochs-1: # last epoch   
+        _, epoc_val_return, H_val_gen = utils_GAN.val_step_wgan_gp(model, model_domain, loader_H_eval, loss_fn, lower_range, 
+                                        adv_weight=adv_weight, est_weight=est_weight, domain_weight=domain_weight, 
+                                        linear_interp=linear_interp, return_H_gen=True)
         
     else:
         _, epoc_val_return = utils_GAN.val_step_wgan_gp(model, model_domain, loader_H_eval, loss_fn, lower_range, 
@@ -453,5 +458,9 @@ for epoch in range(n_epochs):
 # Save performances
 # Save H matrix
 savemat(model_path + '/' + sub_folder + '/H_visualize/H_trix.mat', H_to_save)
+savemat(model_path + '/' + sub_folder + '/H_visualize/H_val_generated.mat', 
+        {'H_val_gen': H_val_gen,
+        'indices_val_source': indices_val_source,
+        'indices_val_target': indices_val_target})
 
     
