@@ -110,17 +110,17 @@ indices_target = np.resize(indices_target, N_samp)
 
 # =======================================================
 ## Divide the indices into training and validation sets
-# indices_train_source = indices_source[:train_size]
-# indices_val_source   = indices_source[train_size:train_size + val_size]
+indices_train_source = indices_source[:train_size]
+indices_val_source   = indices_source[train_size:train_size + val_size]
 
-# indices_train_target = indices_target[:train_size]
-# indices_val_target   = indices_target[train_size:train_size + val_size]
+indices_train_target = indices_target[:train_size]
+indices_val_target   = indices_target[train_size:train_size + val_size]
 
 # to test code
-indices_train_source = indices_source[:96]
-indices_val_source = indices_source[2032:]
-indices_train_target = indices_target[:96]
-indices_val_target = indices_target[2032:]
+# indices_train_source = indices_source[:96]
+# indices_val_source = indices_source[2032:]
+# indices_train_target = indices_target[:96]
+# indices_val_target = indices_target[2032:]
 
 print('train_size = ', indices_train_source.shape[0])
 print('val_size = ', indices_val_source.shape[0])
@@ -157,12 +157,12 @@ from JMMD.helper.utils_GAN import train_step_wgan_gp_source_only, val_step_wgan_
 import time
 start = time.perf_counter()
 
-# n_epochs= 300
-# epoch_min = 50
-# epoch_step = 50
-n_epochs= 3
-epoch_min = 0
-epoch_step = 1
+n_epochs= 300
+epoch_min = 50
+epoch_step = 50
+# n_epochs= 3
+# epoch_min = 0
+# epoch_step = 1
 
 sub_folder_ = ['GAN_linear']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
 
@@ -175,8 +175,8 @@ for sub_folder in sub_folder_:
         'w_dist': {}            # Dictionary to store Wasserstein distances by epoch
     }
     linear_interp = False
-    if sub_folder == 'GAN_linear':
-        linear_interp =True # flag to clip values that go beyond the estimated pilot (min, max)
+    # if sub_folder == 'GAN_linear':
+    #     linear_interp =True # flag to clip values that go beyond the estimated pilot (min, max)
     ##
     loader_H_true_train_source = class_dict_source[sub_folder].true_train
     loader_H_input_train_source = class_dict_source[sub_folder].input_train

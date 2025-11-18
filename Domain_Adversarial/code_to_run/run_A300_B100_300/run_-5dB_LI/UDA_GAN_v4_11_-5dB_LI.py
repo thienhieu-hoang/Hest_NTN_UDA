@@ -63,12 +63,12 @@ if CNN_DropOut != 0:
     dropOut_txt = f'Add p={CNN_DropOut} DropOut'
     
 # Paths to save
-path_temp = notebook_dir + f'/model/GAN_cal/{SNR}_dB/'
+path_temp = notebook_dir + f'/model/GAN_cal_A300_B100_300/{SNR}_dB/'
 os.makedirs(os.path.dirname(path_temp), exist_ok=True)
 idx_save_path = loader.find_incremental_filename(path_temp,'ver', '_', '')
 
 save_model = True
-model_path = notebook_dir + f'/model/GAN_cal/{SNR}_dB/ver' + str(idx_save_path) + '_'
+model_path = notebook_dir + f'/model/GAN_cal_A300_B100_300/{SNR}_dB/ver' + str(idx_save_path) + '_'
 # figure_path = notebook_dir + '/model/GAN/ver' + str(idx_save_path) + '_/figure'
 model_readme = model_path + '/readme.txt'
 
@@ -153,10 +153,10 @@ loss_fn_domain = tf.keras.losses.BinaryCrossentropy()  # Domain classification l
 
 load_checkpoint = False  # True if continue training
 if load_checkpoint:
-    # model_path = notebook_dir + '/model/GAN_cal/ver' + str(idx_save_path-1) + '_' # or replace idx_save_path-1 by the desired folder index
-    model_path = notebook_dir + f'/model/GAN_cal/{SNR}_dB/ver' + str(idx_save_path-1) + '_'
+    # model_path = notebook_dir + '/model/GAN_cal_A300_B100_300/ver' + str(idx_save_path-1) + '_' # or replace idx_save_path-1 by the desired folder index
+    model_path = notebook_dir + f'/model/GAN_cal_A300_B100_300/{SNR}_dB/ver' + str(idx_save_path-1) + '_'
 else:
-    model_path = notebook_dir + f'/model/GAN_cal/{SNR}_dB/ver' + str(idx_save_path) + '_'
+    model_path = notebook_dir + f'/model/GAN_cal_A300_B100_300/{SNR}_dB/ver' + str(idx_save_path) + '_'
 if load_checkpoint:
     start_epoch = 3  # This is the epoch we want to CONTINUE FROM (not load from)
 else:

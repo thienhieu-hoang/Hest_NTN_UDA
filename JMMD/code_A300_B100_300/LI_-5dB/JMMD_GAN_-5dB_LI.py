@@ -54,12 +54,12 @@ elif norm_approach == 'no':
     norm_txt = 'No'
     
 # Paths to save
-path_temp = project_root + f'/JMMD/model/GAN_cal/{SNR}_dB/'
+path_temp = project_root + f'/JMMD/model/GAN_calA300_B100_300/{SNR}_dB/'
 os.makedirs(os.path.dirname(path_temp), exist_ok=True)
 idx_save_path = loader.find_incremental_filename(path_temp,'ver', '_', '')
 
 save_model = False
-model_path = project_root + f'/JMMD/model/GAN_cal/{SNR}_dB/ver' + str(idx_save_path) + '_'
+model_path = project_root + f'/JMMD/model/GAN_calA300_B100_300/{SNR}_dB/ver' + str(idx_save_path) + '_'
 # figure_path = code_dir + '/model/GAN/ver' + str(idx_save_path) + '_/figure'
 model_readme = model_path + '/readme.txt'
 
@@ -100,17 +100,17 @@ indices_target = np.resize(indices_target, N_samp)
 
 # =======================================================
 ## Divide the indices into training and validation sets
-# indices_train_source = indices_source[:train_size]
-# indices_val_source   = indices_source[train_size:train_size + val_size]
+indices_train_source = indices_source[:train_size]
+indices_val_source   = indices_source[train_size:train_size + val_size]
 
-# indices_train_target = indices_target[:train_size]
-# indices_val_target   = indices_target[train_size:train_size + val_size]
+indices_train_target = indices_target[:train_size]
+indices_val_target   = indices_target[train_size:train_size + val_size]
 
 # to test code
-indices_train_source = indices_source[:96]
-indices_val_source = indices_source[2032:]
-indices_train_target = indices_target[:96]
-indices_val_target = indices_target[2032:]
+# indices_train_source = indices_source[:96]
+# indices_val_source = indices_source[2032:]
+# indices_train_target = indices_target[:96]
+# indices_val_target = indices_target[2032:]
 
 print('train_size = ', indices_train_source.shape[0])
 print('val_size = ', indices_val_source.shape[0])
@@ -147,12 +147,12 @@ from JMMD.helper.utils_GAN import train_step_wgan_gp_jmmd, val_step_wgan_gp_jmmd
 import time
 start = time.perf_counter()
 
-# n_epochs= 300
-# epoch_min = 20
-# epoch_step = 20
-n_epochs= 3
-epoch_min = 0
-epoch_step = 1
+n_epochs= 300
+epoch_min = 20
+epoch_step = 20
+# n_epochs= 3
+# epoch_min = 0
+# epoch_step = 1
 
 sub_folder_ = ['GAN_linear']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
 
