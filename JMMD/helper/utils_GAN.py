@@ -516,7 +516,7 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
         y_src = loader_H_true_train_src.next_batch()
         x_tgt = loader_H_input_train_tgt.next_batch()
         y_tgt = loader_H_true_train_tgt.next_batch()
-        N_train += x_src.shape[0] + x_tgt.shape[0]
+        N_train += x_src.shape[0]
 
         # Preprocess (source)
         x_src = complx2real(x_src)
@@ -693,9 +693,6 @@ def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, low
     epoc_loss_est = 0.0
     epoc_loss_jmmd = 0.0
     epoc_loss_est_tgt = 0.0
-    
-    features_src = []
-    features_tgt = []
     N_train = 0
     
     if save_features==True and (jmmd_weight != 0):
@@ -713,14 +710,14 @@ def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, low
     
     
     for batch_idx in range(loader_H_true_train_src.total_batches):
-        # --- Get data (same as original) ---
+        # --- Get data ---
         x_src = loader_H_input_train_src.next_batch()
         y_src = loader_H_true_train_src.next_batch()
         x_tgt = loader_H_input_train_tgt.next_batch()
         y_tgt = loader_H_true_train_tgt.next_batch()
         N_train += x_src.shape[0]
 
-        # Preprocess (source) - same as original
+        # Preprocess (source)
         x_src = complx2real(x_src)
         y_src = complx2real(y_src)
         x_src = np.transpose(x_src, (0, 2, 3, 1))
@@ -728,7 +725,7 @@ def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, low
         x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src, lower_range=lower_range, linear_interp=linear_interp)
         y_scaled_src, _, _ = minmaxScaler(y_src, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
 
-        # Preprocess (target) - same as original
+        # Preprocess (target)
         x_tgt = complx2real(x_tgt)
         y_tgt = complx2real(y_tgt)
         x_tgt = np.transpose(x_tgt, (0, 2, 3, 1))
@@ -751,28 +748,31 @@ def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, low
             
             # WGAN-GP discriminator loss
             d_loss = tf.reduce_mean(d_fake) - tf.reduce_mean(d_real) + lambda_gp * gp
+            
+            # Add L2 regularization loss from discriminator
+            if model.discriminator.losses:
+                d_loss += tf.add_n(model.discriminator.losses)
         
-        gradients_of_discriminator = tape_d.gradient(d_loss, model.discriminator.trainable_variables)
-        disc_optimizer.apply_gradients(zip(gradients_of_discriminator, model.discriminator.trainable_variables))
+        grads_d = tape_d.gradient(d_loss, model.discriminator.trainable_variables)
+        disc_optimizer.apply_gradients(zip(grads_d, model.discriminator.trainable_variables))
+        epoc_loss_d += d_loss.numpy() * x_src.shape[0]
         
         # === 2. Train Generator with Normalized JMMD ===
         with tf.GradientTape() as tape_g:
             # Generate with feature extraction for JMMD
-            x_fake_src, features_src_batch = model.generator(x_scaled_src, training=True, return_features=True)
-            x_fake_tgt, features_tgt_batch = model.generator(x_scaled_tgt, training=True, return_features=True)
-            
-            # Generator adversarial loss
+            x_fake_src, features_src = model.generator(x_scaled_src, training=True, return_features=True)
             d_fake_src = model.discriminator(x_fake_src, training=True)
+            
+            # Generate from target domain with features
+            x_fake_tgt, features_tgt = model.generator(x_scaled_tgt, training=True, return_features=True)
+            
+            # Generator losses
             g_adv_loss = -tf.reduce_mean(d_fake_src)
-            
-            # Estimation loss (only on source domain with ground truth)
             g_est_loss = loss_fn_est(y_scaled_src, x_fake_src)
-            
-            # Target estimation loss (for monitoring only - no labels available)
-            g_est_loss_tgt = loss_fn_est(y_scaled_tgt, x_fake_tgt) if y_scaled_tgt is not None else 0.0
+            g_est_loss_tgt = loss_fn_est(y_scaled_tgt, x_fake_tgt) 
             
             # NORMALIZED JMMD loss between source and target features
-            jmmd_loss = jmmd_loss_fn(features_src_batch, features_tgt_batch)
+            jmmd_loss = jmmd_loss_fn(features_src, features_tgt)
             
             # Smoothness regularization (using existing function)
             if temporal_weight != 0 or frequency_weight != 0:
@@ -832,10 +832,6 @@ def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, low
         epoc_loss_est_tgt += g_est_loss_tgt.numpy() * x_tgt.shape[0]
         epoc_loss_jmmd += jmmd_loss.numpy() * x_src.shape[0]
         
-        # Save features for analysis
-        if save_features:
-            features_src.append(features_src_batch)
-            features_tgt.append(features_tgt_batch)
             
     # end batch loop
     if save_features and (jmmd_weight != 0):    

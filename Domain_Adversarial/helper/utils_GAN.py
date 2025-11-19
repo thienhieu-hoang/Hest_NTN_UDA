@@ -644,7 +644,7 @@ def train_step_wgan_gp(model, domain_model, loader_H, loss_fn, optimizers, lower
         # --- Target domain ---
         x_tgt = loader_H_input_train_tgt.next_batch()
         y_tgt = loader_H_true_train_tgt.next_batch()
-        N_train += x_src.shape[0] + x_tgt.shape[0]
+        N_train += x_src.shape[0]
 
         # Preprocess (source)
         x_src = utils.complx2real(x_src)
@@ -998,7 +998,7 @@ def normalize_features_for_domain_adaptation(features):
     
     return features_normalized
 
-def train_step_wgan_gp_dann_normalized(model, domain_model, loader_H, loss_fn, optimizers, 
+def train_step_wgan_gp_normalized(model, domain_model, loader_H, loss_fn, optimizers, 
                                      lower_range=-1, return_features=False, nsymb=14, 
                                      adv_weight=0.01, est_weight=1.0, domain_weight=0.5, 
                                      linear_interp=False, normalize_dann_features=True):
@@ -1037,7 +1037,7 @@ def train_step_wgan_gp_dann_normalized(model, domain_model, loader_H, loss_fn, o
         # --- Target domain ---
         x_tgt = loader_H_input_train_tgt.next_batch()
         y_tgt = loader_H_true_train_tgt.next_batch()
-        N_train += x_src.shape[0] + x_tgt.shape[0]
+        N_train += x_src.shape[0]
 
         # Preprocess (source)
         x_src = utils.complx2real(x_src)
@@ -1114,6 +1114,7 @@ def train_step_wgan_gp_dann_normalized(model, domain_model, loader_H, loss_fn, o
             # Total generator loss
             g_loss = adv_weight * g_adv_loss + est_weight * g_est_loss + domain_weight * domain_loss_grl
             
+            # Add L2 regularization loss
             if model.generator.losses:
                 g_loss += tf.add_n(model.generator.losses)
         grads_g = tape_g.gradient(g_loss, model.generator.trainable_variables)
@@ -1200,6 +1201,210 @@ def train_step_wgan_gp_dann_normalized(model, domain_model, loader_H, loss_fn, o
         film_features_source=features_src,
         avg_epoc_loss_d=avg_loss_d
     )
+
+def val_step_wgan_gp_normalized(model, domain_model, loader_H, loss_fn, lower_range, nsymb=14, adv_weight=0.01, 
+                               est_weight=1.0, domain_weight=0.5, linear_interp=False,
+                               return_H_gen=False, normalize_dann_features=True):
+    """
+    Validation step for GAN model with optional DANN feature normalization.
+    Returns H_sample and epoc_eval_return (summary metrics).
+    Args:
+        model: GAN model instance
+        domain_model: domain discriminator instance
+        loader_H: tuple of (input_src, true_src, input_tgt, true_tgt) DataLoaders
+        loss_fn: tuple of (estimation loss, binary cross-entropy loss, domain loss)
+        lower_range: lower range for min-max scaling
+        nsymb: number of symbols
+        adv_weight, est_weight, domain_weight: loss weights
+        normalize_dann_features: Whether to normalize features for domain discriminator
+    Returns:
+        H_sample, epoc_eval_return
+    """
+    from sklearn.metrics import accuracy_score
+    loader_H_input_val_source, loader_H_true_val_source, loader_H_input_val_target, loader_H_true_val_target = loader_H
+    loss_fn_est, loss_fn_bce, loss_fn_domain = loss_fn
+    N_val_source = 0
+    N_val_target = 0
+    epoc_loss_est_source = 0.0
+    epoc_loss_est_target = 0.0
+    epoc_nmse_val_source = 0.0
+    epoc_nmse_val_target = 0.0
+    epoc_gan_disc_loss = 0.0
+    epoc_domain_disc_loss = 0.0
+    epoc_domain_acc_source = 0.0
+    epoc_domain_acc_target = 0.0
+    H_sample = []
+    if return_H_gen:
+        all_H_gen_src = []
+        all_H_gen_tgt = []
+
+    for idx in range(loader_H_true_val_source.total_batches):
+        # --- Source domain ---
+        x_src = loader_H_input_val_source.next_batch()
+        y_src = loader_H_true_val_source.next_batch()
+        # --- Target domain ---
+        x_tgt = loader_H_input_val_target.next_batch()
+        y_tgt = loader_H_true_val_target.next_batch()
+        N_val_source += x_src.shape[0]
+        N_val_target += x_tgt.shape[0]
+
+        # Preprocess (source)
+        x_src_real = utils.complx2real(x_src)
+        y_src_real = utils.complx2real(y_src)
+        x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
+        y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = utils.minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = utils.minmaxScaler(y_src_real, min_pre=x_min_src, max_pre=x_max_src,  lower_range=lower_range)
+
+        # Preprocess (target)
+        x_tgt_real = utils.complx2real(x_tgt)
+        y_tgt_real = utils.complx2real(y_tgt)
+        x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
+        y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
+        x_scaled_tgt, x_min_tgt, x_max_tgt = utils.minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_tgt, _, _ = utils.minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+
+        # === Source domain prediction ===
+        preds_src, features_src = model.generator(x_scaled_src, training=False)
+        preds_src = preds_src.numpy() if hasattr(preds_src, 'numpy') else preds_src
+        preds_src_descaled = utils.deMinMax(preds_src, x_min_src, x_max_src, lower_range=lower_range)
+        batch_est_loss_source = loss_fn_est(y_scaled_src, preds_src).numpy()
+        epoc_loss_est_source += batch_est_loss_source * x_src.shape[0]
+        mse_val_source = np.mean((preds_src_descaled - y_src_real) ** 2, axis=(1, 2, 3))
+        power_source = np.mean(y_src_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_source += np.mean(mse_val_source / (power_source + 1e-30)) * x_src.shape[0]
+
+        # === Target domain prediction ===
+        preds_tgt, features_tgt = model.generator(x_scaled_tgt, training=False)
+        preds_tgt = preds_tgt.numpy() if hasattr(preds_tgt, 'numpy') else preds_tgt
+        preds_tgt_descaled = utils.deMinMax(preds_tgt, x_min_tgt, x_max_tgt, lower_range=lower_range)
+        batch_est_loss_target = loss_fn_est(y_scaled_tgt, preds_tgt).numpy()
+        epoc_loss_est_target += batch_est_loss_target * x_tgt.shape[0]
+        mse_val_target = np.mean((preds_tgt_descaled - y_tgt_real) ** 2, axis=(1, 2, 3))
+        power_target = np.mean(y_tgt_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_target += np.mean(mse_val_target / (power_target + 1e-30)) * x_tgt.shape[0]
+
+        # === WGAN Discriminator Scores (for monitoring only) ===
+        # Only considering source domain
+        d_real_src = model.discriminator(y_scaled_src, training=False)
+        d_fake_src = model.discriminator(preds_src, training=False)
+        gp_src = gradient_penalty(model.discriminator, y_scaled_src, preds_src, batch_size=x_scaled_src.shape[0])
+        lambda_gp = 10.0  # typical gradient penalty weight
+        
+        # WGAN critic loss: mean(fake) - mean(real)
+        d_loss_src = tf.reduce_mean(d_fake_src) - tf.reduce_mean(d_real_src) + lambda_gp * gp_src
+        
+        # only observe GAN disc loss on source dataset
+        epoc_gan_disc_loss += d_loss_src.numpy() * x_src.shape[0]
+
+        # === Domain Discriminator Loss & Accuracy (with Normalized Features) ===
+        if loss_fn_domain is not None:
+            # APPLY NORMALIZATION TO FEATURES BEFORE DOMAIN DISCRIMINATOR EVALUATION
+            if normalize_dann_features:
+                features_src_norm = normalize_features_for_domain_adaptation(features_src)
+                features_tgt_norm = normalize_features_for_domain_adaptation(features_tgt)
+                features = np.concatenate([features_src_norm, features_tgt_norm], axis=0)
+            else:
+                features = np.concatenate([features_src, features_tgt], axis=0)
+            
+            domain_labels_src = np.ones((features_src.shape[0], 1))
+            domain_labels_tgt = np.zeros((features_tgt.shape[0], 1))
+            domain_labels = np.concatenate([domain_labels_src, domain_labels_tgt], axis=0)
+            domain_pred = domain_model(features, training=False)
+            domain_loss = loss_fn_domain(domain_labels, domain_pred).numpy() * features.shape[0]
+            epoc_domain_disc_loss += domain_loss
+            
+            # Accuracy (source) - use normalized features if enabled
+            if normalize_dann_features:
+                domain_pred_src = domain_model(features_src_norm, training=False)
+            else:
+                domain_pred_src = domain_model(features_src, training=False)
+            domain_pred_src_bin = tf.cast(domain_pred_src >= 0.5, tf.int32)
+            acc_src = accuracy_score(domain_labels_src, domain_pred_src_bin)
+            epoc_domain_acc_source += acc_src * features_src.shape[0]
+            
+            # Accuracy (target) - use normalized features if enabled
+            if normalize_dann_features:
+                domain_pred_tgt = domain_model(features_tgt_norm, training=False)
+            else:
+                domain_pred_tgt = domain_model(features_tgt, training=False)
+            domain_pred_tgt_bin = tf.cast(domain_pred_tgt >= 0.5, tf.int32)
+            acc_tgt = accuracy_score(domain_labels_tgt, domain_pred_tgt_bin)
+            epoc_domain_acc_target += acc_tgt * features_tgt.shape[0]
+
+        # === Save H samples for visualization at first batch ===
+        if idx == 0:
+            n_samples = min(3, x_src_real.shape[0], x_tgt_real.shape[0])
+            # Source
+            H_true_sample = y_src_real[:n_samples].copy()
+            H_input_sample = x_src_real[:n_samples].copy()
+            H_est_sample = preds_src_descaled[:n_samples].numpy().copy()
+            mse_sample_source = np.mean((H_est_sample - H_true_sample) ** 2, axis=(1, 2, 3))
+            power_sample_source = np.mean(H_true_sample ** 2, axis=(1, 2, 3))
+            nmse_est_source = mse_sample_source / (power_sample_source + 1e-30)
+            mse_input_source = np.mean((H_input_sample - H_true_sample) ** 2, axis=(1, 2, 3))
+            nmse_input_source = mse_input_source / (power_sample_source + 1e-30)
+            # Target
+            H_true_sample_target = y_tgt_real[:n_samples].copy()
+            H_input_sample_target = x_tgt_real[:n_samples].copy()
+            H_est_sample_target = preds_tgt_descaled[:n_samples].numpy().copy()
+            mse_sample_target = np.mean((H_est_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            power_sample_target = np.mean(H_true_sample_target ** 2, axis=(1, 2, 3))
+            nmse_est_target = mse_sample_target / (power_sample_target + 1e-30)
+            mse_input_target = np.mean((H_input_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            nmse_input_target = mse_input_target / (power_sample_target + 1e-30)
+            H_sample = [H_true_sample, H_input_sample, H_est_sample, nmse_input_source, nmse_est_source,
+                        H_true_sample_target, H_input_sample_target, H_est_sample_target, nmse_input_target, nmse_est_target]
+        
+        if return_H_gen:
+            # Convert to numpy if needed and append to lists
+            H_gen_src_batch = preds_src_descaled.numpy().copy() if hasattr(preds_src_descaled, 'numpy') else preds_src_descaled.copy()
+            H_gen_tgt_batch = preds_tgt_descaled.numpy().copy() if hasattr(preds_tgt_descaled, 'numpy') else preds_tgt_descaled.copy()
+            
+            all_H_gen_src.append(H_gen_src_batch)
+            all_H_gen_tgt.append(H_gen_tgt_batch)
+    if return_H_gen:
+        # Concatenate all batches along the batch dimension (axis=0)
+        H_gen_src_all = np.concatenate(all_H_gen_src, axis=0)
+        H_gen_tgt_all = np.concatenate(all_H_gen_tgt, axis=0)
+        H_gen = {
+            'H_gen_src': H_gen_src_all,
+            'H_gen_tgt': H_gen_tgt_all
+        }
+
+    # Calculate averages
+    N_val = N_val_source + N_val_target
+    avg_loss_est_source = epoc_loss_est_source / N_val_source
+    avg_loss_est_target = epoc_loss_est_target / N_val_target
+    avg_loss_est = (avg_loss_est_source + avg_loss_est_target) / 2
+    avg_nmse_source = epoc_nmse_val_source / N_val_source
+    avg_nmse_target = epoc_nmse_val_target / N_val_target
+    avg_nmse = (avg_nmse_source + avg_nmse_target) / 2
+    # only observe GAN disc loss on source dataset
+    avg_gan_disc_loss = epoc_gan_disc_loss / N_val_source 
+    
+    avg_domain_disc_loss = epoc_domain_disc_loss / N_val_source if epoc_domain_disc_loss > 0 else 0.0
+    # Domain discriminator accuracy
+    avg_domain_acc_source = epoc_domain_acc_source / N_val_source if N_val_source > 0 else 0.0
+    avg_domain_acc_target = epoc_domain_acc_target / N_val_target if N_val_target > 0 else 0.0
+    avg_domain_acc = (epoc_domain_acc_source + epoc_domain_acc_target) / N_val if N_val > 0 else 0.0
+
+    # Weighted total loss (for comparison with training)
+    avg_total_loss = est_weight * avg_loss_est + adv_weight * avg_gan_disc_loss + domain_weight * avg_domain_disc_loss
+
+    # Compose epoc_eval_return
+    epoc_eval_return = [
+        avg_total_loss,
+        avg_loss_est_source, avg_loss_est_target, avg_loss_est,
+        avg_gan_disc_loss, avg_domain_disc_loss,
+        avg_nmse_source, avg_nmse_target, avg_nmse,
+        avg_domain_acc_source, avg_domain_acc_target, avg_domain_acc
+    ]
+    
+    if return_H_gen:
+        return H_sample, epoc_eval_return, H_gen
+
+    return H_sample, epoc_eval_return
 
 def visualize_H(H_sample, H_to_save, epoch, figChan, flag, model_path, sub_folder, domain_weight=True):
     (
