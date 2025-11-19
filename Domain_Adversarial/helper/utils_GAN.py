@@ -979,6 +979,227 @@ def val_step_wgan_gp(model, domain_model, loader_H, loss_fn, lower_range, nsymb=
 
     return H_sample, epoc_eval_return
 
+def normalize_features_for_domain_adaptation(features):
+    """
+    Normalize features for better DANN performance
+    Apply L2 normalization + standardization
+    """
+    # Flatten if needed (your features are already flattened from d4)
+    if len(features.shape) > 2:
+        features = tf.reshape(features, [tf.shape(features)[0], -1])
+    
+    # Step 1: L2 normalization (unit vectors)
+    features_l2 = tf.nn.l2_normalize(features, axis=-1)
+    
+    # Step 2: Standardization (zero mean, unit variance)
+    mean = tf.reduce_mean(features_l2, axis=0, keepdims=True)
+    std = tf.math.reduce_std(features_l2, axis=0, keepdims=True) + 1e-8
+    features_normalized = (features_l2 - mean) / std
+    
+    return features_normalized
+
+def train_step_wgan_gp_dann_normalized(model, domain_model, loader_H, loss_fn, optimizers, 
+                                     lower_range=-1, return_features=False, nsymb=14, 
+                                     adv_weight=0.01, est_weight=1.0, domain_weight=0.5, 
+                                     linear_interp=False, normalize_dann_features=True):
+    """
+    Enhanced WGAN-GP training with DANN feature normalization
+    """
+    loader_H_input_train_src, loader_H_true_train_src, \
+        loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
+    loss_fn_est, loss_fn_bce, loss_fn_domain = loss_fn
+    gen_optimizer, disc_optimizer, domain_optimizer = optimizers
+
+    epoc_loss_g = 0.0
+    epoc_loss_d = 0.0
+    epoc_loss_est = 0.0
+    epoc_loss_est_tgt = 0.0
+    epoc_loss_domain = 0.0
+    N_train = 0
+    
+    if return_features==True and (domain_weight != 0):
+        features_h5_path_source = 'features_source.h5'
+        if os.path.exists(features_h5_path_source):
+            os.remove(features_h5_path_source)
+        features_h5_source = h5py.File(features_h5_path_source, 'w')
+        features_dataset_source = None
+
+        features_h5_path_target = 'features_target.h5'
+        if os.path.exists(features_h5_path_target):
+            os.remove(features_h5_path_target)   
+        features_h5_target = h5py.File(features_h5_path_target, 'w')
+        features_dataset_target = None
+
+    for batch_idx in range(loader_H_true_train_src.total_batches):
+        # --- Source domain ---
+        x_src = loader_H_input_train_src.next_batch()
+        y_src = loader_H_true_train_src.next_batch()
+        # --- Target domain ---
+        x_tgt = loader_H_input_train_tgt.next_batch()
+        y_tgt = loader_H_true_train_tgt.next_batch()
+        N_train += x_src.shape[0] + x_tgt.shape[0]
+
+        # Preprocess (source)
+        x_src = utils.complx2real(x_src)
+        y_src = utils.complx2real(y_src)
+        x_src = np.transpose(x_src, (0, 2, 3, 1))
+        y_src = np.transpose(y_src, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = utils.minmaxScaler(x_src, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = utils.minmaxScaler(y_src, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+
+        # Preprocess (target)
+        x_tgt = utils.complx2real(x_tgt)
+        y_tgt = utils.complx2real(y_tgt)
+        x_tgt = np.transpose(x_tgt, (0, 2, 3, 1))
+        y_tgt = np.transpose(y_tgt, (0, 2, 3, 1))
+        x_scaled_tgt, x_min_tgt, x_max_tgt = utils.minmaxScaler(x_tgt, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_tgt, _, _ = utils.minmaxScaler(y_tgt, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+
+        # === 1. Train Discriminator ===
+        with tf.GradientTape() as tape_d:
+            x_fake_src = model.generator(x_scaled_src, training=True)[0]
+            d_real = model.discriminator(y_scaled_src, training=True)
+            d_fake = model.discriminator(x_fake_src, training=True)
+            
+            gp = gradient_penalty(model.discriminator, y_scaled_src, x_fake_src, batch_size=x_scaled_src.shape[0])
+            lambda_gp = 10.0
+            d_loss = tf.reduce_mean(d_fake) - tf.reduce_mean(d_real) + lambda_gp * gp
+            
+            if model.discriminator.losses:
+                d_loss += tf.add_n(model.discriminator.losses)
+        grads_d = tape_d.gradient(d_loss, model.discriminator.trainable_variables)
+        disc_optimizer.apply_gradients(zip(grads_d, model.discriminator.trainable_variables))
+        epoc_loss_d += d_loss.numpy() * x_src.shape[0]
+        
+        # === 2. Train Generator (with Normalized DANN) ===
+        with tf.GradientTape() as tape_g:
+            out_src = model(x_scaled_src, training=True)
+            x_fake_src = out_src.gen_out
+            features_src = out_src.extracted_features
+            d_fake = out_src.disc_out
+            
+            g_adv_loss = -tf.reduce_mean(d_fake)
+            g_est_loss = loss_fn_est(y_scaled_src, x_fake_src)
+            
+            # Target domain
+            out_tgt = model(x_scaled_tgt, training=True)
+            x_fake_tgt = out_tgt.gen_out
+            features_tgt = out_tgt.extracted_features
+            g_est_loss_tgt = loss_fn_est(y_scaled_tgt, x_fake_tgt)
+            
+            # === NORMALIZED DANN Domain Loss ===
+            if domain_weight > 0:
+                # NORMALIZE FEATURES BEFORE GRADIENT REVERSAL
+                if normalize_dann_features:
+                    features_src_norm = normalize_features_for_domain_adaptation(features_src)
+                    features_tgt_norm = normalize_features_for_domain_adaptation(features_tgt)
+                else:
+                    features_src_norm = features_src
+                    features_tgt_norm = features_tgt
+                
+                # Apply gradient reversal to normalized features
+                features_grl = tf.concat([
+                    GradientReversal()(features_src_norm), 
+                    GradientReversal()(features_tgt_norm)
+                ], axis=0)
+                
+                domain_labels_src = tf.ones((features_src.shape[0], 1))
+                domain_labels_tgt = tf.zeros((features_tgt.shape[0], 1))
+                domain_labels = tf.concat([domain_labels_src, domain_labels_tgt], axis=0)
+                domain_pred = domain_model(features_grl, training=True)
+                domain_loss_grl = loss_fn_domain(domain_labels, domain_pred)
+            else:
+                domain_loss_grl = 0.0
+            
+            # Total generator loss
+            g_loss = adv_weight * g_adv_loss + est_weight * g_est_loss + domain_weight * domain_loss_grl
+            
+            if model.generator.losses:
+                g_loss += tf.add_n(model.generator.losses)
+        grads_g = tape_g.gradient(g_loss, model.generator.trainable_variables)
+        gen_optimizer.apply_gradients(zip(grads_g, model.generator.trainable_variables))
+        epoc_loss_g += g_loss.numpy() * x_src.shape[0]
+        epoc_loss_est += g_est_loss.numpy() * x_src.shape[0]
+        epoc_loss_est_tgt += g_est_loss_tgt.numpy() * x_tgt.shape[0]
+
+        # === 3. Train Domain Discriminator (with Normalized Features) ===
+        if domain_weight != 0:
+            with tf.GradientTape() as tape_domain:
+                _, features_src = model.generator(x_scaled_src, training=False)
+                _, features_tgt = model.generator(x_scaled_tgt, training=False)
+
+                # NORMALIZE FEATURES FOR DOMAIN DISCRIMINATOR TRAINING
+                if normalize_dann_features:
+                    features_src_norm = normalize_features_for_domain_adaptation(features_src)
+                    features_tgt_norm = normalize_features_for_domain_adaptation(features_tgt)
+                    features = tf.concat([features_src_norm, features_tgt_norm], axis=0)
+                else:
+                    features = tf.concat([features_src, features_tgt], axis=0)
+
+                domain_labels_src = tf.ones((features_src.shape[0], 1))
+                domain_labels_tgt = tf.zeros((features_tgt.shape[0], 1))
+                domain_labels = tf.concat([domain_labels_src, domain_labels_tgt], axis=0)
+                
+                domain_pred = domain_model(features, training=True)
+                domain_loss = loss_fn_domain(domain_labels, domain_pred)
+                if domain_model.losses:
+                    domain_loss += tf.add_n(domain_model.losses)
+            grads_domain = tape_domain.gradient(domain_loss, domain_model.trainable_variables)
+            domain_optimizer.apply_gradients(zip(grads_domain, domain_model.trainable_variables))
+            epoc_loss_domain += domain_loss.numpy() * features.shape[0]
+    
+        # === 4. Save features if required ===
+        if return_features and (domain_weight != 0):
+            # Use normalized features for analysis
+            if normalize_dann_features:
+                features_np_source = normalize_features_for_domain_adaptation(features_src).numpy()
+                features_np_target = normalize_features_for_domain_adaptation(features_tgt).numpy()
+            else:
+                features_np_source = features_src.numpy()
+                features_np_target = features_tgt.numpy()
+                
+            if features_dataset_source is None:
+                features_dataset_source = features_h5_source.create_dataset(
+                    'features',
+                    data=features_np_source,
+                    maxshape=(None,) + features_np_source.shape[1:],
+                    chunks=True
+                )
+            else:
+                features_dataset_source.resize(features_dataset_source.shape[0] + features_np_source.shape[0], axis=0)
+                features_dataset_source[-features_np_source.shape[0]:] = features_np_source
+                
+            if features_dataset_target is None:
+                features_dataset_target = features_h5_target.create_dataset(
+                    'features',
+                    data=features_np_target,
+                    maxshape=(None,) + features_np_target.shape[1:],
+                    chunks=True
+                )
+            else:
+                features_dataset_target.resize(features_dataset_target.shape[0] + features_np_target.shape[0], axis=0)
+                features_dataset_target[-features_np_target.shape[0]:] = features_np_target
+    
+    # end batch loop
+    if return_features and (domain_weight != 0):    
+        features_h5_source.close()
+        features_h5_target.close()
+
+    avg_loss_g = epoc_loss_g / N_train
+    avg_loss_d = epoc_loss_d / N_train
+    avg_loss_est = epoc_loss_est / N_train
+    avg_loss_domain = epoc_loss_domain / N_train
+    avg_loss_est_tgt = epoc_loss_est_tgt / N_train
+    
+    return train_step_Output(
+        avg_epoc_loss_est=avg_loss_est,
+        avg_epoc_loss_domain=avg_loss_domain,
+        avg_epoc_loss=avg_loss_g,
+        avg_epoc_loss_est_target=avg_loss_est_tgt,
+        features_source=features_src,
+        film_features_source=features_src,
+        avg_epoc_loss_d=avg_loss_d
+    )
 
 def visualize_H(H_sample, H_to_save, epoch, figChan, flag, model_path, sub_folder, domain_weight=True):
     (
@@ -1007,15 +1228,15 @@ def visualize_H(H_sample, H_to_save, epoch, figChan, flag, model_path, sub_folde
     figChan(H_est_sample_target[0,:,:,0], nmse=nmse_est_target[0], title='GAN-refined Channel', index_save=epoch+1, 
                                 figure_save_path=model_path + '/' + sub_folder + '/H_visualize', name='H_GAN_target')
 
-    H_to_save[f'{epoch+1}_H_true_source'] = H_true_sample
-    H_to_save[f'{epoch+1}_H_input_source'] = H_input_sample
-    H_to_save[f'{epoch+1}_H_est_source'] = H_est_sample
+    H_to_save[f'H_{epoch+1}_true_source'] = H_true_sample
+    H_to_save[f'H_{epoch+1}_input_source'] = H_input_sample
+    H_to_save[f'H_{epoch+1}_est_source'] = H_est_sample
         # don't save nmse_input_source, nmse_est_source because can compute them later
     #
     if domain_weight:
-        H_to_save[f'{epoch+1}_H_true_target'] = H_true_sample_target
-        H_to_save[f'{epoch+1}_H_input_target'] = H_input_sample_target
-        H_to_save[f'{epoch+1}_H_est_target'] = H_est_sample_target
+        H_to_save[f'H_{epoch+1}_true_target'] = H_true_sample_target
+        H_to_save[f'H_{epoch+1}_input_target'] = H_input_sample_target
+        H_to_save[f'H_{epoch+1}_est_target'] = H_est_sample_target
 
 def post_val(epoc_val_return, epoch, n_epochs, val_est_loss, val_est_loss_source, val_loss, val_est_loss_target,
             val_gan_disc_loss, val_domain_disc_loss, nmse_val_source, nmse_val_target, nmse_val, source_acc, target_acc, acc, domain_weight=True):
