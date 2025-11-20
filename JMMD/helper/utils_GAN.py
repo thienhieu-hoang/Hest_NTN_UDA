@@ -142,15 +142,15 @@ class Pix2PixGenerator(tf.keras.Model):
             
     def call(self, x, training=False, return_features=False): # return_features=False to just get the bottleneck layer features, 
         # Encoder
-        d1 = self.down1(x, training=training)      # (batch, 395, 12, C_out)
-        d2 = self.down2(d1, training=training)     # (batch, 196, 10, C_out)
-        d3 = self.down3(d2, training=training)     # (batch,  97, 8, C_out)
-        d4 = self.down4(d3, training=training)     # (batch,  48, 6, C_out)
+        d1 = self.down1(x, training=training)      # (batch, 65, 14, C_out)
+        d2 = self.down2(d1, training=training)     # (batch, 32, 14, C_out)
+        d3 = self.down3(d2, training=training)     # (batch,  15, 14, C_out)
+        d4 = self.down4(d3, training=training)     # (batch,  7, 14, C_out)
         # Decoder with skip connections
-        u1 = self.up1(d4, d3, training=training)   # (batch,  97, 8, C_out)
-        u2 = self.up2(u1, d2, training=training)   # (batch, 196, 10, C_out)
-        u3 = self.up3(u2, d1, training=training)   # (batch, 395, 12, C_out)
-        u4 = self.last(u3)  # (batch, 792, 14 or 16, C_out)
+        u1 = self.up1(d4, d3, training=training)   # (batch,  15, 14, C_out)
+        u2 = self.up2(u1, d2, training=training)   # (batch, 32, 14, C_out)
+        u3 = self.up3(u2, d1, training=training)   # (batch, 65, 14, C_out)
+        u4 = self.last(u3)  # (batch, 132, 14, C_out)
         
         if u4.shape[2] > 14:
             u4 = u4[:, :, 1:15, :]
@@ -1917,63 +1917,74 @@ def val_step_wgan_gp_source_only(model, loader_H, loss_fn, lower_range, nsymb=14
 # ================= DEEPER GAN ARCHITECTURE =====================
 
 class ResidualUNetBlock(tf.keras.layers.Layer):
-    """Enhanced UNet block with residual connections for deeper processing"""
+    """Enhanced UNet block with residual connections, using reflect padding like original UNetBlock"""
     
-    def __init__(self, filters, apply_dropout=False, kernel_size=(3,3), strides=(2,1), gen_l2=None, **kwargs):
+    def __init__(self, filters, apply_dropout=False, kernel_size=(4,3), strides=(2,1), pad_h=0, pad_w=1, gen_l2=None, **kwargs):
         super().__init__(**kwargs)
         self.filters = filters
         self.apply_dropout = apply_dropout
         self.strides = strides
+        self.pad_h = pad_h
+        self.pad_w = pad_w
         kernel_regularizer = tf.keras.regularizers.l2(gen_l2) if gen_l2 is not None else None
         
-        # Main convolution path
+        # Main convolution path (same as original UNetBlock)
         self.conv1 = tf.keras.layers.Conv2D(
-            filters, kernel_size, strides=strides, padding='valid',
+            filters, kernel_size=kernel_size, strides=strides, padding='valid',
             kernel_regularizer=kernel_regularizer
         )
         self.norm1 = InstanceNormalization()
         
-        # Residual processing (same shape)
+        # Residual processing (same shape after main conv)
         self.conv2 = tf.keras.layers.Conv2D(
-            filters, (3,3), strides=(1,1), padding='same',
+            filters, (3,3), strides=(1,1), padding='valid',  # Use 'valid' for reflect padding
             kernel_regularizer=kernel_regularizer
         )
         self.norm2 = InstanceNormalization()
         
         self.conv3 = tf.keras.layers.Conv2D(
-            filters, (3,3), strides=(1,1), padding='same',
+            filters, (3,3), strides=(1,1), padding='valid',  # Use 'valid' for reflect padding
             kernel_regularizer=kernel_regularizer
         )
         self.norm3 = InstanceNormalization()
         
         self.dropout = tf.keras.layers.Dropout(0.3) if apply_dropout else None
         
-        # Skip connection adjustment if needed
+        # Skip connection adjustment if needed (for residual connection)
         self.residual_conv = None
         
     def build(self, input_shape):
         super().build(input_shape)
-        # Create residual connection if channel dimensions don't match
+        # Create residual connection adjustment if channel dimensions don't match after main conv
+        # We need to account for the spatial change from main conv
         if input_shape[-1] != self.filters:
             self.residual_conv = tf.keras.layers.Conv2D(
                 self.filters, (1,1), strides=self.strides, padding='valid'
             )
     
     def call(self, x, training=False):
-        # Main convolution with spatial reduction
-        out = reflect_padding_2d(x, 0, 1)
-        out = self.conv1(out)
+        # Main convolution with spatial reduction (same as original UNetBlock)
+        if self.pad_h > 0 or self.pad_w > 0:
+            x_padded = reflect_padding_2d(x, pad_h=self.pad_h, pad_w=self.pad_w)
+        else:
+            x_padded = x
+            
+        out = self.conv1(x_padded)
         out = self.norm1(out, training=training)
         out = tf.nn.leaky_relu(out)
         
-        # Residual processing (same spatial dimensions)
+        # Store for residual connection (after spatial reduction)
         residual = out
         
-        out = self.conv2(out)
+        # Residual processing (same spatial dimensions as 'out')
+        # For 3x3 kernel, we need 1 pixel padding on each side
+        out_padded = reflect_padding_2d(out, pad_h=1, pad_w=1)
+        out = self.conv2(out_padded)
         out = self.norm2(out, training=training)
         out = tf.nn.leaky_relu(out)
         
-        out = self.conv3(out)
+        out_padded = reflect_padding_2d(out, pad_h=1, pad_w=1)
+        out = self.conv3(out_padded)
         out = self.norm3(out, training=training)
         
         # Add residual connection
@@ -1985,24 +1996,23 @@ class ResidualUNetBlock(tf.keras.layers.Layer):
             
         return out
 
-
 class SameShapeBlock(tf.keras.layers.Layer):
-    """Same-shape processing block for adding depth without spatial reduction"""
+    """Same-shape processing block for adding depth without spatial reduction using reflect padding"""
     
     def __init__(self, filters, gen_l2=None, **kwargs):
         super().__init__(**kwargs)
         self.filters = filters
         kernel_regularizer = tf.keras.regularizers.l2(gen_l2) if gen_l2 is not None else None
         
-        # Same-shape processing
+        # Same-shape processing with 'valid' padding (we'll use reflect_padding_2d manually)
         self.conv1 = tf.keras.layers.Conv2D(
-            filters, (3,3), strides=(1,1), padding='same',
+            filters, (3,3), strides=(1,1), padding='valid',  # Changed to 'valid'
             kernel_regularizer=kernel_regularizer
         )
         self.norm1 = InstanceNormalization()
         
         self.conv2 = tf.keras.layers.Conv2D(
-            filters, (3,3), strides=(1,1), padding='same',
+            filters, (3,3), strides=(1,1), padding='valid',  # Changed to 'valid'
             kernel_regularizer=kernel_regularizer
         )
         self.norm2 = InstanceNormalization()
@@ -2014,17 +2024,20 @@ class SameShapeBlock(tf.keras.layers.Layer):
         super().build(input_shape)
         if input_shape[-1] != self.filters:
             self.channel_adjust = tf.keras.layers.Conv2D(
-                self.filters, (1,1), strides=(1,1), padding='same'
+                self.filters, (1,1), strides=(1,1), padding='same'  # 1x1 conv doesn't need reflect padding
             )
     
     def call(self, x, training=False):
         residual = x
         
-        # Same-shape processing
-        out = self.conv1(x)
+        # Same-shape processing with reflect padding
+        # For 3x3 kernel, we need 1 pixel padding on each side
+        out = reflect_padding_2d(x, pad_h=1, pad_w=1)  # Reflect padding
+        out = self.conv1(out)
         out = self.norm1(out, training=training)
         out = tf.nn.leaky_relu(out)
         
+        out = reflect_padding_2d(out, pad_h=1, pad_w=1)  # Reflect padding
         out = self.conv2(out)
         out = self.norm2(out, training=training)
         
@@ -2038,105 +2051,138 @@ class SameShapeBlock(tf.keras.layers.Layer):
         
         return out
 
-
 class ResidualUNetUpBlock(tf.keras.layers.Layer):
-    """Enhanced UNet upsampling block with residual connections"""
+    """Enhanced UNet upsampling block with residual connections, similar to original UNetUpBlock"""
     
-    def __init__(self, filters, apply_dropout=False, kernel_size=(3,3), strides=(2,1), gen_l2=None, **kwargs):
+    def __init__(self, filters, apply_dropout=False, kernel_size=(4,3), strides=(2,1), gen_l2=None, **kwargs):
         super().__init__(**kwargs)
         self.filters = filters
         self.apply_dropout = apply_dropout
         kernel_regularizer = tf.keras.regularizers.l2(gen_l2) if gen_l2 is not None else None
         
-        # Upsampling
-        self.conv_transpose = tf.keras.layers.Conv2DTranspose(
-            filters, kernel_size, strides=strides, padding='valid',
-            kernel_regularizer=kernel_regularizer
+        # Upsampling (same as original UNetUpBlock)
+        self.deconv = tf.keras.layers.Conv2DTranspose(
+            filters, kernel_size=kernel_size, strides=strides,
+            padding='valid', kernel_regularizer=kernel_regularizer
         )
         self.norm1 = InstanceNormalization()
         
-        # Residual processing after concatenation
+        # Residual processing after concatenation with skip connection
         self.conv1 = tf.keras.layers.Conv2D(
-            filters, (3,3), strides=(1,1), padding='same',
+            filters, (3,3), strides=(1,1), padding='valid',  # Use 'valid' for reflect padding
             kernel_regularizer=kernel_regularizer
         )
         self.norm2 = InstanceNormalization()
         
         self.conv2 = tf.keras.layers.Conv2D(
-            filters, (3,3), strides=(1,1), padding='same',
+            filters, (3,3), strides=(1,1), padding='valid',  # Use 'valid' for reflect padding
             kernel_regularizer=kernel_regularizer
         )
         self.norm3 = InstanceNormalization()
         
         self.dropout = tf.keras.layers.Dropout(0.3) if apply_dropout else None
+        
+        # Channel adjustment for residual connection after concatenation
+        self.channel_adjust = None
     
-    def call(self, x, skip_connection, training=False):
-        # Upsampling
-        up = reflect_padding_2d(x, 0, 1)
-        up = self.conv_transpose(up)
-        up = self.norm1(up, training=training)
-        up = tf.nn.leaky_relu(up)
+    def build(self, input_shape):
+        super().build(input_shape)
+        # We'll create channel_adjust dynamically in call() since we need to know
+        # the concatenated tensor shape
+        pass
+    
+    def call(self, x, skip, training=False):
+        # Upsampling (same as original UNetUpBlock)
+        x = self.deconv(x)
         
-        # Concatenate with skip connection
-        concat = tf.concat([up, skip_connection], axis=-1)
+        # Handle width adjustment if needed (same as original)
+        if x.shape[2] > 14: 
+            x = x[:, :, 1:15, :]
+            
+        x = self.norm1(x, training=training)
+        x = tf.nn.relu(x)
         
-        # Residual processing
+        # Concatenate with skip connection (same as original)
+        concat = tf.concat([x, skip], axis=-1)
+        
+        if self.dropout:
+            concat = self.dropout(concat, training=training)
+        
+        # Residual processing on concatenated features
         residual = concat
         
-        out = self.conv1(concat)
+        # Process concatenated features with reflect padding
+        # For 3x3 kernel, we need 1 pixel padding on each side
+        out = reflect_padding_2d(concat, pad_h=1, pad_w=1)
+        out = self.conv1(out)
         out = self.norm2(out, training=training)
         out = tf.nn.leaky_relu(out)
         
+        out = reflect_padding_2d(out, pad_h=1, pad_w=1)
         out = self.conv2(out)
         out = self.norm3(out, training=training)
         
-        # For residual connection, we need to adjust channels
+        # Channel adjustment for residual connection if needed
         if concat.shape[-1] != out.shape[-1]:
-            residual = tf.keras.layers.Conv2D(out.shape[-1], (1,1))(concat)
+            # Create channel adjustment layer dynamically
+            if self.channel_adjust is None:
+                self.channel_adjust = tf.keras.layers.Conv2D(
+                    out.shape[-1], (1,1), strides=(1,1), padding='same'
+                )
+            residual = self.channel_adjust(concat)
         
+        # Add residual connection
         out = out + residual
         out = tf.nn.leaky_relu(out)
-        
-        if self.dropout:
-            out = self.dropout(out, training=training)
             
         return out
-
 
 class DeeperPix2PixGenerator(tf.keras.Model):
     """Enhanced Pix2Pix generator with residual blocks and same-shape layers"""
     
-    def __init__(self, output_channels=2, n_subc=132, gen_l2=None, extract_layers=None):
+    def __init__(self, output_channels=2, n_subc=132, gen_l2=None, extract_layers=['d4_deep1', 'd4_deep2', 'd4_deep3']):
+        # extract_layers needs to be the correct order (the last one is the deepest layer)
         super().__init__()
         kernel_regularizer = tf.keras.regularizers.l2(gen_l2) if gen_l2 is not None else None
         
         # Configure extraction layers
-        self.extract_layers = extract_layers if extract_layers is not None else ['d2', 'd3', 'd4']
+        self.extract_layers = extract_layers
         
         # Enhanced Encoder with residual blocks and same-shape layers
-        # Level 1: (132, 14) -> (66, 14)
+        # Level 1: (132, 14) -> (65, 14)
         self.down1 = ResidualUNetBlock(32, apply_dropout=False, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
         self.down1_same = SameShapeBlock(64, gen_l2=gen_l2)  # Same-shape processing
         
-        # Level 2: (66, 14) -> (33, 14)  
+        # Level 2: (65, 14) -> (32, 14)  
         self.down2 = ResidualUNetBlock(64, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
         self.down2_same = SameShapeBlock(128, gen_l2=gen_l2)  # Same-shape processing
         
-        # Level 3: (33, 14) -> (16, 14)
+        # Level 3: (32, 14) -> (15, 14)
         self.down3 = ResidualUNetBlock(128, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
         self.down3_same = SameShapeBlock(256, gen_l2=gen_l2)  # Same-shape processing
         
-        # Level 4: (16, 14) -> (8, 14) - Bottleneck with multiple same-shape layers
+        # Level 4: (15, 14) -> (7, 14) - Bottleneck with multiple same-shape layers
         self.down4 = ResidualUNetBlock(256, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
         self.down4_same1 = SameShapeBlock(512, gen_l2=gen_l2)  # Deep bottleneck processing
         self.down4_same2 = SameShapeBlock(512, gen_l2=gen_l2)  # Even deeper processing
         self.down4_same3 = SameShapeBlock(1024, gen_l2=gen_l2) # Deepest features
         
         # Enhanced Decoder with residual blocks
-        self.up1 = ResidualUNetUpBlock(256, apply_dropout=True, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
-        self.up2 = ResidualUNetUpBlock(128, apply_dropout=True, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
-        self.up3 = ResidualUNetUpBlock(64, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        # Bottleneck processing: (7, 14, 1024) -> (7, 14, 256)
+        self.up0_same3 = SameShapeBlock(512, gen_l2=gen_l2)  # Process deep features
+        self.up0_same2 = SameShapeBlock(512, gen_l2=gen_l2)  # Continue processing
+        self.up0_same1 = SameShapeBlock(256, gen_l2=gen_l2)  # Prepare for upsampling
+        self.up0 = ResidualUNetUpBlock(256, apply_dropout=True, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
         
+        # Level 3: (15, 14, 256) -> (32, 14, 128)
+        self.up1_same = SameShapeBlock(128, gen_l2=gen_l2)   # Process concatenated features
+        self.up1 = ResidualUNetUpBlock(128, apply_dropout=True, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+        
+        # Level 2: (32, 14, 128) -> (65, 14, 64)
+        self.up2_same = SameShapeBlock(64, gen_l2=gen_l2)    # Process concatenated features
+        self.up2 = ResidualUNetUpBlock(64, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        
+        # Final output: (65, 14, 64) -> (132, 14, 2)
         self.last = tf.keras.layers.Conv2DTranspose(
             output_channels, kernel_size=(4,3), strides=(2,1), padding='valid',
             activation='tanh', kernel_regularizer=kernel_regularizer
@@ -2144,43 +2190,52 @@ class DeeperPix2PixGenerator(tf.keras.Model):
             
     def call(self, x, training=False, return_features=False):
         # Enhanced Encoder with multiple abstraction levels
-        d1 = self.down1(x, training=training)              # (66, 14, 32)
-        d1_deep = self.down1_same(d1, training=training)   # (66, 14, 64) - same-shape processing
+        d1 = self.down1(x, training=training)              # (65, 14, 32)
+        d1_deep = self.down1_same(d1, training=training)   # (65, 14, 64) - same-shape processing
         
-        d2 = self.down2(d1_deep, training=training)        # (33, 14, 64) 
-        d2_deep = self.down2_same(d2, training=training)   # (33, 14, 128) - same-shape processing
+        d2 = self.down2(d1_deep, training=training)        # (32, 14, 64) 
+        d2_deep = self.down2_same(d2, training=training)   # (32, 14, 128) - same-shape processing
         
-        d3 = self.down3(d2_deep, training=training)        # (16, 14, 128)
-        d3_deep = self.down3_same(d3, training=training)   # (16, 14, 256) - same-shape processing
+        d3 = self.down3(d2_deep, training=training)        # (15, 14, 128)
+        d3_deep = self.down3_same(d3, training=training)   # (15, 14, 256) - same-shape processing
         
-        d4 = self.down4(d3_deep, training=training)        # (8, 14, 256)
-        d4_deep1 = self.down4_same1(d4, training=training) # (8, 14, 512) - deep bottleneck
-        d4_deep2 = self.down4_same2(d4_deep1, training=training) # (8, 14, 512) - deeper
-        d4_deep3 = self.down4_same3(d4_deep2, training=training) # (8, 14, 1024) - deepest
+        d4 = self.down4(d3_deep, training=training)        # (7, 14, 256)
+        d4_deep1 = self.down4_same1(d4, training=training) # (7, 14, 512) - deep bottleneck
+        d4_deep2 = self.down4_same2(d4_deep1, training=training) # (7, 14, 512) - deeper
+        d4_deep3 = self.down4_same3(d4_deep2, training=training) # (7, 14, 1024) - deepest
         
         # Enhanced Decoder with skip connections
-        u1 = self.up1(d4_deep3, d3_deep, training=training) # (16, 14, 256)
-        u2 = self.up2(u1, d2_deep, training=training)       # (33, 14, 128) 
-        u3 = self.up3(u2, d1_deep, training=training)       # (66, 14, 64)
-        u4 = self.last(u3)                                  # (132, 14, 2)
+        # Bottleneck processing
+        u0_proc3 = self.up0_same3(d4_deep3, training=training)  # Process deepest features
+        u0_proc2 = self.up0_same2(u0_proc3, training=training)  # Continue processing
+        u0_proc1 = self.up0_same1(u0_proc2, training=training)  # Prepare for skip connection
+        u0 = self.up0(u0_proc1, d3_deep, training=training)     # Skip from d3_deep
         
-        if u4.shape[2] > 14:
-            u4 = u4[:, :, 1:15, :]
+        # Level 3 reconstruction
+        u1_proc = self.up1_same(u0, training=training)          # Process concat features
+        u1 = self.up1(u1_proc, d2_deep, training=training)      # Skip from d2_deep
+        
+        # Level 2 reconstruction  
+        u2_proc = self.up2_same(u1, training=training)          # Process concat features
+        u2 = self.up2(u2_proc, d1_deep, training=training)      # Skip from d1_deep
+        
+        # Final output
+        u3 = self.last(u2)
+        
+        if u3.shape[2] > 14:
+            u3 = u3[:, :, 1:15, :]
+            
+        layer_map = {
+                'd1': d1, 'd1_deep': d1_deep,
+                'd2': d2, 'd2_deep': d2_deep,
+                'd3': d3, 'd3_deep': d3_deep,
+                'd4': d4, 'd4_deep1': d4_deep1, 'd4_deep2': d4_deep2, 'd4_deep3': d4_deep3,
+                'u0_proc3': u0_proc3, 'u0_proc2': u0_proc2, 'u0_proc1': u0_proc1,
+                'u1_proc': u1_proc, 'u2_proc': u2_proc
+            }
+            
             
         if return_features:
-            # Multiple extraction layers for enhanced JMMD
-            layer_map = {
-                'd1': d1,
-                'd1_deep': d1_deep,
-                'd2': d2,
-                'd2_deep': d2_deep,
-                'd3': d3,
-                'd3_deep': d3_deep,
-                'd4': d4,
-                'd4_deep1': d4_deep1,
-                'd4_deep2': d4_deep2,
-                'd4_deep3': d4_deep3
-            }
             
             features = []
             for layer_name in self.extract_layers:
@@ -2190,9 +2245,11 @@ class DeeperPix2PixGenerator(tf.keras.Model):
                 else:
                     print(f"Warning: Layer '{layer_name}' not found in DeeperPix2PixGenerator")
                     
-            return u4, features
-            
-        return u4, d4_deep3
+            return u3, features
+        # Get the last layer name from extract_layers
+        last_layer_name = self.extract_layers[-1] if self.extract_layers else 'd4_deep3'    
+        last_layer_tensor = layer_map.get(last_layer_name, d4_deep3)
+        return u3, last_layer_tensor
 
 
 class DeeperGAN_Output:
@@ -2207,7 +2264,7 @@ class DeeperGAN(tf.keras.Model):
     """Enhanced GAN with deeper generator and multiple feature extraction"""
     
     def __init__(self, n_subc=132, generator=None, discriminator=None, 
-                 gen_l2=None, disc_l2=None, extract_layers=None):
+                 gen_l2=None, disc_l2=None, extract_layers=['d4_deep1', 'd4_deep2', 'd4_deep3']):
         super().__init__()
         
         # Use deeper generator by default
