@@ -981,20 +981,28 @@ def val_step_wgan_gp(model, domain_model, loader_H, loss_fn, lower_range, nsymb=
 
 def normalize_features_for_domain_adaptation(features):
     """
-    Normalize features for better DANN performance
+    Normalize features for better DANN performance while preserving original shape
     Apply L2 normalization + standardization
     """
-    # Flatten if needed (your features are already flattened from d4)
+    original_shape = tf.shape(features)
+    
+    # Step 1: Flatten for normalization calculations
     if len(features.shape) > 2:
-        features = tf.reshape(features, [tf.shape(features)[0], -1])
+        features_flat = tf.reshape(features, [original_shape[0], -1])
+    else:
+        features_flat = features
     
-    # Step 1: L2 normalization (unit vectors)
-    features_l2 = tf.nn.l2_normalize(features, axis=-1)
+    # Step 2: L2 normalization (unit vectors)
+    features_l2 = tf.nn.l2_normalize(features_flat, axis=-1)
     
-    # Step 2: Standardization (zero mean, unit variance)
+    # Step 3: Standardization (zero mean, unit variance)
     mean = tf.reduce_mean(features_l2, axis=0, keepdims=True)
     std = tf.math.reduce_std(features_l2, axis=0, keepdims=True) + 1e-8
     features_normalized = (features_l2 - mean) / std
+    
+    # Step 4: Reshape back to original shape
+    if len(features.shape) > 2:
+        features_normalized = tf.reshape(features_normalized, original_shape)
     
     return features_normalized
 
