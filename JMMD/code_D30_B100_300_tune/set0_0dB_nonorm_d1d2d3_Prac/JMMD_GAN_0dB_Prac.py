@@ -55,12 +55,12 @@ elif norm_approach == 'no':
     norm_txt = 'No'
     
 # Paths to save
-path_temp = project_root + f'/JMMD/model/GAN_cal_D30_10_B100_300_tune/set0_d2d3_dB/'
+path_temp = project_root + f'/JMMD/model/GAN_cal_D30_10_B100_300_tune/set0_d1d2d3/'
 os.makedirs(os.path.dirname(path_temp), exist_ok=True)
 idx_save_path = loader.find_incremental_filename(path_temp,'ver', '_', '')
 
 save_model = False
-model_path = project_root + f'/JMMD/model/GAN_cal_D30_10_B100_300_tune/set0_d2d3_dB/ver' + str(idx_save_path) + '_'
+model_path = project_root + f'/JMMD/model/GAN_cal_D30_10_B100_300_tune/set0_d1d2d3/ver' + str(idx_save_path) + '_'
 # figure_path = code_dir + '/model/GAN/ver' + str(idx_save_path) + '_/figure'
 model_readme = model_path + '/readme.txt'
 

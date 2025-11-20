@@ -55,12 +55,12 @@ elif norm_approach == 'no':
     norm_txt = 'No'
     
 # Paths to save
-path_temp = project_root + f'/JMMD/model/GAN_cal_D30_10_B100_300_tune/set0_d2d3/'
+path_temp = project_root + f'/JMMD/model/GAN_cal_D30_10_B100_300_tune/set0_d3d4/'
 os.makedirs(os.path.dirname(path_temp), exist_ok=True)
 idx_save_path = loader.find_incremental_filename(path_temp,'ver', '_', '')
 
 save_model = False
-model_path = project_root + f'/JMMD/model/GAN_cal_D30_10_B100_300_tune/set0_d2d3/ver' + str(idx_save_path) + '_'
+model_path = project_root + f'/JMMD/model/GAN_cal_D30_10_B100_300_tune/set0_d3d4/ver' + str(idx_save_path) + '_'
 # figure_path = code_dir + '/model/GAN/ver' + str(idx_save_path) + '_/figure'
 model_readme = model_path + '/readme.txt'
 
@@ -247,7 +247,7 @@ for sub_folder in sub_folder_:
     perform_to_save = {}    # list to save to .mat file for nmse, losses,...
 
     # 
-    model = GAN(n_subc=312, gen_l2=None, disc_l2=1e-5, extract_layers=['d2','d3'])  # l2 regularization for generator and discriminator
+    model = GAN(n_subc=312, gen_l2=None, disc_l2=1e-5, extract_layers=['d3','d4'])  # l2 regularization for generator and discriminator
     # 
     gen_optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4, beta_1=0.5, beta_2=0.9)
     disc_optimizer = tf.keras.optimizers.Adam(learning_rate=1e-5, beta_1=0.5, beta_2=0.9)  # WGAN-GP uses Adam optimizer with beta_1=0.5
