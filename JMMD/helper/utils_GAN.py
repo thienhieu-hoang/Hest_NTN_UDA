@@ -124,9 +124,10 @@ class UNetUpBlock(tf.keras.layers.Layer):
         return x
 
 class Pix2PixGenerator(tf.keras.Model):
-    def __init__(self, output_channels=2, n_subc=132, gen_l2=None):
+    def __init__(self, output_channels=2, n_subc=132, gen_l2=None, extract_layers=['d2', 'd3', 'd4']):
         super().__init__()
         kernel_regularizer = tf.keras.regularizers.l2(gen_l2) if gen_l2 is not None else None
+        self.extract_layers = extract_layers
         # Encoder
         self.down1 = UNetBlock(32, apply_dropout=False, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
         self.down2 = UNetBlock(64, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
@@ -155,11 +156,22 @@ class Pix2PixGenerator(tf.keras.Model):
             u4 = u4[:, :, 1:15, :]
         if return_features:
             # Return multiple feature layers for JMMD
-            features = [
-                tf.reshape(d2, [tf.shape(d2)[0], -1]),  # Feature layer 1
-                tf.reshape(d3, [tf.shape(d3)[0], -1]),  # Feature layer 2
-                tf.reshape(d4, [tf.shape(d4)[0], -1])   # Bottleneck layer
-            ]
+            features = []
+            layer_map = {
+                'd1': d1,
+                'd2': d2, 
+                'd3': d3,
+                'd4': d4,
+                'u1': u1,
+                'u2': u2,
+                'u3': u3
+            }
+            
+            for layer_name in self.extract_layers:
+                if layer_name in layer_map:
+                    layer_tensor = layer_map[layer_name]
+                    features.append(tf.reshape(layer_tensor, [tf.shape(layer_tensor)[0], -1]))
+                
             return u4, features
         return u4, d4
 
@@ -202,9 +214,9 @@ class GAN_Output:
         self.extracted_features = extracted_features  # Extracted features
         
 class GAN(tf.keras.Model):
-    def __init__(self, n_subc=132, generator=Pix2PixGenerator, discriminator=PatchGANDiscriminator, gen_l2=None, disc_l2=None):
+    def __init__(self, n_subc=132, generator=Pix2PixGenerator, discriminator=PatchGANDiscriminator, gen_l2=None, disc_l2=None, extract_layers=['d2', 'd3','d4']):
         super().__init__()
-        self.generator = generator(n_subc=n_subc, gen_l2=gen_l2)
+        self.generator = generator(n_subc=n_subc, gen_l2=gen_l2, extract_layers=extract_layers)
         self.discriminator = discriminator(n_subc=n_subc, disc_l2=disc_l2)
 
     def call(self, inputs, training=False):
