@@ -34,7 +34,7 @@ import loader
 import plotfig
 
 
-SNR = 0
+SNR = 5
 # source_data_file_path_label = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'OpenNTN','H_perfect.mat'))
 # target_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'OpenNTN', f'SNR_{SNR}dB','sionnaNTN.mat'))
 target_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'MATLAB', 'TDL_B_100_300_sim', f'SNR_{SNR}dB','matlabNTN.mat'))
@@ -63,12 +63,12 @@ if CNN_DropOut != 0:
     dropOut_txt = f'Add p={CNN_DropOut} DropOut'
     
 # Paths to save
-path_temp = notebook_dir + f'/model/GAN_cal_A300_B100_300_tune_sameSNR/norm_set0/'
+path_temp = notebook_dir + f'/model/GAN_cal_A300_B100_300_tune_sameSNR/norm_set0_5dB/'
 os.makedirs(os.path.dirname(path_temp), exist_ok=True)
 idx_save_path = loader.find_incremental_filename(path_temp,'ver', '_', '')
 
 save_model = True
-model_path = notebook_dir + f'/model/GAN_cal_A300_B100_300_tune_sameSNR/norm_set0/ver' + str(idx_save_path) + '_'
+model_path = notebook_dir + f'/model/GAN_cal_A300_B100_300_tune_sameSNR/norm_set0_5dB/ver' + str(idx_save_path) + '_'
 # figure_path = notebook_dir + '/model/GAN/ver' + str(idx_save_path) + '_/figure'
 model_readme = model_path + '/readme.txt'
 
@@ -170,7 +170,7 @@ epoch_step = 20
 # epoch_min = 0
 # epoch_step = 1
 
-sub_folder = 'GAN_linear'  # 'GAN_linear', 'GAN_practical', 'GAN_ls'
+sub_folder = 'GAN_practical'  # 'GAN_linear', 'GAN_practical', 'GAN_ls'
 print(f"Processing: {sub_folder}")
 
 w_dist = []
@@ -426,7 +426,7 @@ for epoch in range(n_epochs):
     loss_fn = [loss_fn_ce, loss_fn_bce, loss_fn_domain]
     
     # eval_func = utils_UDA_FiLM.val_step
-    if (epoch==epoch_min) or (epoch+1>epoch_min and (epoch-epoch_min)%epoch_step==0):
+    if (epoch==epoch_min) or (epoch+1>epoch_min and (epoch-epoch_min)%epoch_step==0) and epoch!=n_epochs-1:
         H_sample, epoc_val_return = utils_GAN.val_step_wgan_gp_normalized(model, model_domain, loader_H_eval, loss_fn, lower_range, 
                                         adv_weight=adv_weight, est_weight=est_weight, domain_weight=domain_weight, linear_interp=linear_interp)
         utils_GAN.visualize_H(H_sample, H_to_save, epoch, plotfig.figChan, flag, model_path, sub_folder, domain_weight=domain_weight)
