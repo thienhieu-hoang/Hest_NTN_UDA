@@ -140,7 +140,8 @@ class Pix2PixGenerator(tf.keras.Model):
         self.last = tf.keras.layers.Conv2DTranspose(output_channels, kernel_size=(4,3), strides=(2,1), padding='valid',
                                                     activation='tanh', kernel_regularizer=kernel_regularizer)
             
-    def call(self, x, training=False, return_features=False): # return_features=False to just get the bottleneck layer features, 
+    def call(self, x, training=False, return_features=False): 
+                # always return list of features no matter return_features=True or False 
         # Encoder
         d1 = self.down1(x, training=training)      # (batch, 65, 14, C_out)
         d2 = self.down2(d1, training=training)     # (batch, 32, 14, C_out)
@@ -154,26 +155,25 @@ class Pix2PixGenerator(tf.keras.Model):
         
         if u4.shape[2] > 14:
             u4 = u4[:, :, 1:15, :]
-        if return_features:
-            # Return multiple feature layers for JMMD
-            features = []
-            layer_map = {
-                'd1': d1,
-                'd2': d2, 
-                'd3': d3,
-                'd4': d4,
-                'u1': u1,
-                'u2': u2,
-                'u3': u3
-            }
             
-            for layer_name in self.extract_layers:
-                if layer_name in layer_map:
-                    layer_tensor = layer_map[layer_name]
-                    features.append(tf.reshape(layer_tensor, [tf.shape(layer_tensor)[0], -1]))
-                
-            return u4, features
-        return u4, d4
+        # Return multiple feature layers for JMMD
+        features = []
+        layer_map = {
+            'd1': d1,
+            'd2': d2, 
+            'd3': d3,
+            'd4': d4,
+            'u1': u1,
+            'u2': u2,
+            'u3': u3
+        }
+        
+        for layer_name in self.extract_layers:
+            if layer_name in layer_map:
+                layer_tensor = layer_map[layer_name]
+                features.append(tf.reshape(layer_tensor, [tf.shape(layer_tensor)[0], -1]))
+                    # features is already flattened
+        return u4, features
 
 class PatchGANDiscriminator(tf.keras.Model):
     """
@@ -549,7 +549,7 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
         # === 1. Train Discriminator (WGAN-GP) ===
         # Only considering source domain for discriminator training
         with tf.GradientTape() as tape_d:
-            x_fake_src, _ = model.generator(x_scaled_src, training=True, return_features=False)
+            x_fake_src, _ = model.generator(x_scaled_src, training=True)
             d_real = model.discriminator(y_scaled_src, training=True)
             d_fake = model.discriminator(x_fake_src, training=True)
             
@@ -571,11 +571,11 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
         # === 2. Train Generator with JMMD ===
         with tf.GradientTape() as tape_g:
             # Generate from source domain with features
-            x_fake_src, features_src = model.generator(x_scaled_src, training=True, return_features=True)
+            x_fake_src, features_src = model.generator(x_scaled_src, training=True)
             d_fake_src = model.discriminator(x_fake_src, training=False)
             
             # Generate from target domain with features
-            x_fake_tgt, features_tgt = model.generator(x_scaled_tgt, training=True, return_features=True)
+            x_fake_tgt, features_tgt = model.generator(x_scaled_tgt, training=True)
             
             # Generator losses
             g_adv_loss = -tf.reduce_mean(d_fake_src)  # WGAN-GP adversarial loss
@@ -668,15 +668,15 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
 
 # Training function with normalized JMMD
 def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, lower_range=-1, 
-                                      save_features=False, nsymb=14, weights=None, linear_interp=False,
-                                      normalize_features=True, layer_weights=None, debug_features=False):
+                                    save_features=False, nsymb=14, weights=None, linear_interp=False,
+                                    normalize_features=True, layer_weights=None, debug_features=False):
     """
     Enhanced WGAN-GP training step with normalized JMMD for better domain adaptation
     
     Args:
         model: GAN model instance with generator and discriminator
         loader_H: tuple of (loader_H_input_train_src, loader_H_true_train_src, 
-                           loader_H_input_train_tgt, loader_H_true_train_tgt)
+                        loader_H_input_train_tgt, loader_H_true_train_tgt)
         loss_fn: tuple of loss functions (estimation_loss, bce_loss)
         optimizers: tuple of (gen_optimizer, disc_optimizer)
         normalize_features (bool): Enable feature normalization in JMMD
@@ -697,7 +697,7 @@ def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, low
     
     # Initialize NORMALIZED JMMD loss
     jmmd_loss_fn = JMMDLossNormalized(normalize_features=normalize_features, 
-                                     layer_weights=layer_weights)
+                                    layer_weights=layer_weights)
     
     # Training loop metrics
     epoc_loss_g = 0.0
@@ -749,7 +749,7 @@ def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, low
         
         # === 1. Train Discriminator (WGAN-GP) ===
         with tf.GradientTape() as tape_d:
-            x_fake_src, _ = model.generator(x_scaled_src, training=True, return_features=False)
+            x_fake_src, _ = model.generator(x_scaled_src, training=True)
             
             d_real = model.discriminator(y_scaled_src, training=True)
             d_fake = model.discriminator(x_fake_src, training=True)
@@ -772,11 +772,11 @@ def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, low
         # === 2. Train Generator with Normalized JMMD ===
         with tf.GradientTape() as tape_g:
             # Generate with feature extraction for JMMD
-            x_fake_src, features_src = model.generator(x_scaled_src, training=True, return_features=True)
+            x_fake_src, features_src = model.generator(x_scaled_src, training=True)
             d_fake_src = model.discriminator(x_fake_src, training=True)
             
             # Generate from target domain with features
-            x_fake_tgt, features_tgt = model.generator(x_scaled_tgt, training=True, return_features=True)
+            x_fake_tgt, features_tgt = model.generator(x_scaled_tgt, training=True)
             
             # Generator losses
             g_adv_loss = -tf.reduce_mean(d_fake_src)
@@ -796,9 +796,9 @@ def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, low
                 
             # Total generator loss
             g_loss = (est_weight * g_est_loss + 
-                     adv_weight * g_adv_loss + 
-                     jmmd_weight * jmmd_loss + 
-                     smoothness_loss)
+                    adv_weight * g_adv_loss + 
+                    jmmd_weight * jmmd_loss + 
+                    smoothness_loss)
             
             # Add L2 regularization
             if model.generator.losses:
@@ -2083,7 +2083,10 @@ class ResidualUNetUpBlock(tf.keras.layers.Layer):
         self.dropout = tf.keras.layers.Dropout(0.3) if apply_dropout else None
         
         # Channel adjustment for residual connection after concatenation
-        self.channel_adjust = None
+        self.channel_adjust = tf.keras.layers.Dense(
+            filters, use_bias=False,  # Optional: no bias for residual
+            kernel_regularizer=kernel_regularizer
+        )
     
     def build(self, input_shape):
         super().build(input_shape)
@@ -2123,13 +2126,10 @@ class ResidualUNetUpBlock(tf.keras.layers.Layer):
         out = self.norm3(out, training=training)
         
         # Channel adjustment for residual connection if needed
-        if concat.shape[-1] != out.shape[-1]:
-            # Create channel adjustment layer dynamically
-            if self.channel_adjust is None:
-                self.channel_adjust = tf.keras.layers.Conv2D(
-                    out.shape[-1], (1,1), strides=(1,1), padding='same'
-                )
+        if concat.shape[-1] != out.shape[-1]: # or self.filters
             residual = self.channel_adjust(concat)
+        else:
+            residual = concat
         
         # Add residual connection
         out = out + residual
@@ -2234,22 +2234,15 @@ class DeeperPix2PixGenerator(tf.keras.Model):
                 'u1_proc': u1_proc, 'u2_proc': u2_proc
             }
             
-            
-        if return_features:
-            
-            features = []
-            for layer_name in self.extract_layers:
-                if layer_name in layer_map:
-                    layer_tensor = layer_map[layer_name]
-                    features.append(tf.reshape(layer_tensor, [tf.shape(layer_tensor)[0], -1]))
-                else:
-                    print(f"Warning: Layer '{layer_name}' not found in DeeperPix2PixGenerator")
-                    
-            return u3, features
-        # Get the last layer name from extract_layers
-        last_layer_name = self.extract_layers[-1] if self.extract_layers else 'd4_deep3'    
-        last_layer_tensor = layer_map.get(last_layer_name, d4_deep3)
-        return u3, last_layer_tensor
+        features = []
+        for layer_name in self.extract_layers:
+            if layer_name in layer_map:
+                layer_tensor = layer_map[layer_name]
+                features.append(tf.reshape(layer_tensor, [tf.shape(layer_tensor)[0], -1]))
+            else:
+                print(f"Warning: Layer '{layer_name}' not found in DeeperPix2PixGenerator")
+                
+        return u3, features
 
 
 class DeeperGAN_Output:
@@ -2263,17 +2256,9 @@ class DeeperGAN_Output:
 class DeeperGAN(tf.keras.Model):
     """Enhanced GAN with deeper generator and multiple feature extraction"""
     
-    def __init__(self, n_subc=132, generator=None, discriminator=None, 
-                 gen_l2=None, disc_l2=None, extract_layers=['d4_deep1', 'd4_deep2', 'd4_deep3']):
+    def __init__(self, n_subc=132, generator=DeeperPix2PixGenerator, discriminator=PatchGANDiscriminator, 
+                gen_l2=None, disc_l2=None, extract_layers=['d4_deep1', 'd4_deep2', 'd4_deep3']):
         super().__init__()
-        
-        # Use deeper generator by default
-        if generator is None:
-            generator = DeeperPix2PixGenerator
-            
-        # Use existing discriminator by default
-        if discriminator is None:
-            discriminator = PatchGANDiscriminator
             
         self.generator = generator(
             n_subc=n_subc, 
