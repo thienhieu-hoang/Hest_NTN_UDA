@@ -6,6 +6,7 @@ import h5py
 import os
 import sys 
 from dataclasses import dataclass
+from sklearn.decomposition import IncrementalPCA
 
 from tensorflow import keras
 
@@ -475,6 +476,35 @@ def compute_total_smoothness_loss(x, temporal_weight=0.02, frequency_weight=0.1)
     loss_smoothness = temporal_weight * temporal_loss + frequency_weight * frequency_loss
     return loss_smoothness
 
+def save_compressed_batch_to_h5(batch_pca, h5_file, dataset, is_source=True):
+    """
+    Helper function to save PCA-compressed batch to HDF5 file
+    """
+    if dataset is None:
+        # First batch - create dataset
+        dataset = h5_file.create_dataset(
+            'features',
+            data=batch_pca,
+            maxshape=(None,) + batch_pca.shape[1:],
+            chunks=True
+        )
+        # Initialize domain labels
+        domain_labels = np.ones(batch_pca.shape[0]) if is_source else np.zeros(batch_pca.shape[0])
+        h5_file.create_dataset('domain_labels', data=domain_labels, maxshape=(None,), chunks=True)
+    else:
+        # Append to existing dataset
+        old_size = dataset.shape[0]
+        dataset.resize(old_size + batch_pca.shape[0], axis=0)
+        dataset[-batch_pca.shape[0]:] = batch_pca
+        
+        # Append domain labels
+        domain_labels = np.ones(batch_pca.shape[0]) if is_source else np.zeros(batch_pca.shape[0])
+        domain_dataset = h5_file['domain_labels']
+        domain_dataset.resize(old_size + batch_pca.shape[0], axis=0)
+        domain_dataset[-batch_pca.shape[0]:] = domain_labels
+    
+    return dataset
+
 def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1, 
                             save_features = False, nsymb=14, weights=None, linear_interp=False):
     """
@@ -486,7 +516,7 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
                         loader_H_input_train_tgt, loader_H_true_train_tgt)
         loss_fn: tuple of loss functions (estimation_loss, bce_loss) - no domain loss needed
         optimizers: tuple of (gen_optimizer, disc_optimizer) - no domain optimizer needed
-        jmmd_weight: weight for JMMD loss (replaces domain_weight)
+        domain_weight: weight for JMMD loss (replaces domain_weight)
     """
     loader_H_input_train_src, loader_H_true_train_src, \
         loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
@@ -497,7 +527,7 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
     temporal_weight = weights.get('temporal_weight', 0.0)
     frequency_weight = weights.get('frequency_weight', 0.0)
     est_weight = weights.get('est_weight', 1.0)
-    jmmd_weight = weights.get('jmmd_weight', 0.5)
+    jmmd_weight = weights.get('domain_weight')
     
     # Initialize JMMD loss
     jmmd_loss_fn = JMMDLoss()
@@ -635,6 +665,291 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
                 features_dataset_target.resize(features_dataset_target.shape[0] + features_np_target.shape[0], axis=0)
                 features_dataset_target[-features_np_target.shape[0]:] = features_np_target
                 
+        grads_g = tape_g.gradient(g_loss, model.generator.trainable_variables)
+        gen_optimizer.apply_gradients(zip(grads_g, model.generator.trainable_variables))
+        
+        epoc_loss_g += g_loss.numpy() * x_src.shape[0]
+        epoc_loss_est += g_est_loss.numpy() * x_src.shape[0]
+        epoc_loss_est_tgt += g_est_loss_tgt.numpy() * x_tgt.shape[0]
+        epoc_loss_jmmd += jmmd_loss.numpy() * x_src.shape[0]
+    # end batch loop
+    if save_features and (jmmd_weight != 0):    
+        features_h5_source.close()
+        features_h5_target.close()
+    
+    # Average losses
+    avg_loss_g = epoc_loss_g / N_train
+    avg_loss_d = epoc_loss_d / N_train
+    avg_loss_est = epoc_loss_est / N_train
+    avg_loss_jmmd = epoc_loss_jmmd / N_train
+    avg_loss_est_tgt = epoc_loss_est_tgt / N_train
+    
+    # Return compatible output structure (replacing domain loss with JMMD)
+    return train_step_Output(
+        avg_epoc_loss_est=avg_loss_est,
+        avg_epoc_loss_domain=avg_loss_jmmd,  # Replace domain loss with JMMD
+        avg_epoc_loss=avg_loss_g,
+        avg_epoc_loss_est_target=avg_loss_est_tgt,
+        features_source=features_src[-1] if features_src else None,  # Return bottleneck features
+        film_features_source=features_src[-1] if features_src else None,
+        avg_epoc_loss_d=avg_loss_d
+    )
+
+def train_step_wgan_gp_jmmd_new(model, loader_H, loss_fn, optimizers, lower_range=-1, 
+                            save_features = False, nsymb=14, weights=None, linear_interp=False,
+                            pca_components=2000):
+    """
+    Modified WGAN-GP training step using JMMD instead of domain discriminator
+    
+    Args:
+        model: GAN model instance with generator and discriminator
+        loader_H: tuple of (loader_H_input_train_src, loader_H_true_train_src, 
+                        loader_H_input_train_tgt, loader_H_true_train_tgt)
+        loss_fn: tuple of loss functions (estimation_loss, bce_loss) - no domain loss needed
+        optimizers: tuple of (gen_optimizer, disc_optimizer) - no domain optimizer needed
+        jmmd_weight: weight for JMMD loss (replaces domain_weight)
+    """
+    loader_H_input_train_src, loader_H_true_train_src, \
+        loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
+    loss_fn_est, loss_fn_bce = loss_fn[:2]  # Only need first two loss functions
+    gen_optimizer, disc_optimizer = optimizers[:2]  # No domain optimizer needed
+    
+    batch_size = loader_H_input_train_src.batch_size
+    adv_weight = weights.get('adv_weight', 0.01)
+    temporal_weight = weights.get('temporal_weight', 0.0)
+    frequency_weight = weights.get('frequency_weight', 0.0)
+    est_weight = weights.get('est_weight', 1.0)
+    jmmd_weight = weights.get('jmmd_weight', 0.5)
+    
+    # Initialize JMMD loss
+    jmmd_loss_fn = JMMDLoss()
+    
+    epoc_loss_g = 0.0
+    epoc_loss_d = 0.0
+    epoc_loss_est = 0.0
+    epoc_loss_est_tgt = 0.0
+    epoc_loss_jmmd = 0.0
+    N_train = 0
+    
+    if save_features==True and (jmmd_weight != 0):
+        # Initialize incremental PCA variables
+        pca_src = IncrementalPCA(n_components=pca_components, batch_size=64)
+        pca_tgt = IncrementalPCA(n_components=pca_components, batch_size=64)
+        pca_fitted = False
+        fitting_batch_count = 0
+        max_fitting_batches = 128//batch_size  # Use first batches to fit PCA
+        
+        # Storage for fitting batches (temporary)
+        fitting_batches_src = []
+        fitting_batches_tgt = []
+        
+        features_h5_path_source = 'features_source.h5'
+        if os.path.exists(features_h5_path_source):
+            os.remove(features_h5_path_source)  # Remove if exists to start fresh
+        features_h5_source = h5py.File(features_h5_path_source, 'w')
+        features_dataset_source = None  # Will be created after first batch
+
+        features_h5_path_target = 'features_target.h5'
+        if os.path.exists(features_h5_path_target):
+            os.remove(features_h5_path_target)  # Remove if exists to start fresh   
+        features_h5_target = h5py.File(features_h5_path_target, 'w')
+        features_dataset_target = None  # Will be created after first batch 
+    
+    for batch_idx in range(loader_H_true_train_src.total_batches):
+        # --- Get data ---
+        x_src = loader_H_input_train_src.next_batch()
+        y_src = loader_H_true_train_src.next_batch()
+        x_tgt = loader_H_input_train_tgt.next_batch()
+        y_tgt = loader_H_true_train_tgt.next_batch()
+        N_train += x_src.shape[0]
+
+        # Preprocess (source)
+        x_src = complx2real(x_src)
+        y_src = complx2real(y_src)
+        x_src = np.transpose(x_src, (0, 2, 3, 1))
+        y_src = np.transpose(y_src, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = minmaxScaler(y_src, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+
+        # Preprocess (target)
+        x_tgt = complx2real(x_tgt)
+        y_tgt = complx2real(y_tgt)
+        x_tgt = np.transpose(x_tgt, (0, 2, 3, 1))
+        y_tgt = np.transpose(y_tgt, (0, 2, 3, 1))
+        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_tgt, _, _ = minmaxScaler(y_tgt, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+
+        # === 1. Train Discriminator (WGAN-GP) ===
+        # Only considering source domain for discriminator training
+        with tf.GradientTape() as tape_d:
+            x_fake_src, _ = model.generator(x_scaled_src, training=True)
+            d_real = model.discriminator(y_scaled_src, training=True)
+            d_fake = model.discriminator(x_fake_src, training=True)
+            
+            # WGAN-GP gradient penalty
+            gp = gradient_penalty(model.discriminator, y_scaled_src, x_fake_src, batch_size=x_scaled_src.shape[0])
+            lambda_gp = 10.0  # typical gradient penalty weight
+
+            # WGAN-GP discriminator loss
+            d_loss = tf.reduce_mean(d_fake) - tf.reduce_mean(d_real) + lambda_gp * gp
+            
+            # Add L2 regularization loss from discriminator
+            if model.discriminator.losses:
+                d_loss += tf.add_n(model.discriminator.losses)
+                
+        grads_d = tape_d.gradient(d_loss, model.discriminator.trainable_variables)
+        disc_optimizer.apply_gradients(zip(grads_d, model.discriminator.trainable_variables))
+        epoc_loss_d += d_loss.numpy() * x_src.shape[0]
+
+        # === 2. Train Generator with JMMD ===
+        with tf.GradientTape() as tape_g:
+            # Generate from source domain with features
+            x_fake_src, features_src = model.generator(x_scaled_src, training=True)
+            d_fake_src = model.discriminator(x_fake_src, training=False)
+            
+            # Generate from target domain with features
+            x_fake_tgt, features_tgt = model.generator(x_scaled_tgt, training=True)
+            
+            # Generator losses
+            g_adv_loss = -tf.reduce_mean(d_fake_src)  # WGAN-GP adversarial loss
+            g_est_loss = loss_fn_est(y_scaled_src, x_fake_src)  # Estimation loss (source)
+            g_est_loss_tgt = loss_fn_est(y_scaled_tgt, x_fake_tgt)  # Estimation loss (target, for monitoring)
+            
+            # JMMD loss between source and target features
+            jmmd_loss = jmmd_loss_fn(features_src, features_tgt)
+            
+            # ADD TEMPORAL SMOOTHNESS LOSS
+            if temporal_weight != 0 or frequency_weight != 0:
+                smoothness_loss_src = compute_total_smoothness_loss(x_fake_src, temporal_weight=temporal_weight, frequency_weight=frequency_weight)
+                smoothness_loss_tgt = compute_total_smoothness_loss(x_fake_tgt, temporal_weight=temporal_weight, frequency_weight=frequency_weight)
+                smoothness_loss = (smoothness_loss_src + smoothness_loss_tgt) / 2
+            else:
+                smoothness_loss = 0.0
+        
+            # Total generator loss
+            g_loss = (est_weight * g_est_loss + 
+                    adv_weight * g_adv_loss + 
+                    jmmd_weight * jmmd_loss + 
+                    smoothness_loss)
+            
+            # Add L2 regularization
+            if model.generator.losses:
+                g_loss += tf.add_n(model.generator.losses)
+        
+        # === 3. Save features (after the bottleneck layer) if required (to calcu PAD) ===
+        if save_features and (jmmd_weight != 0):
+            # save features in a temporary file instead of stacking them up, to avoid memory exploding
+            features_np_source = features_src[-1].numpy()  # Convert to numpy if it's a tensor
+            # print('Feature shape: ', features_np_source.shape)
+            # Check if already flattened, if not, flatten
+            if len(features_np_source.shape) > 2:
+                features_np_source = features_np_source.reshape(features_np_source.shape[0], -1)            
+            # if features_dataset_source is None:
+            #     # Create dataset with unlimited first dimension
+            #     features_dataset_source = features_h5_source.create_dataset(
+            #         'features',
+            #         data=features_np_source,
+            #         maxshape=(None,) + features_np_source.shape[1:],
+            #         chunks=True
+            #     )
+            # else:
+            #     # Resize and append
+            #     features_dataset_source.resize(features_dataset_source.shape[0] + features_np_source.shape[0], axis=0)
+            #     features_dataset_source[-features_np_source.shape[0]:] = features_np_source
+                
+            features_np_target = features_tgt[-1].numpy()
+            if len(features_np_target.shape) > 2:
+                features_np_target = features_np_target.reshape(features_np_target.shape[0], -1)            
+            # if features_dataset_target is None:
+            #     # Create dataset with unlimited first dimension
+            #     features_dataset_target = features_h5_target.create_dataset(
+            #         'features',
+            #         data=features_np_target,
+            #         maxshape=(None,) + features_np_target.shape[1:],
+            #         chunks=True
+            #     )
+            # else:
+            #     # Resize and append
+            #     features_dataset_target.resize(features_dataset_target.shape[0] + features_np_target.shape[0], axis=0)
+            #     features_dataset_target[-features_np_target.shape[0]:] = features_np_target
+                
+            print(f'Batch {batch_idx+1}: Original feature shape - Source: {features_np_source.shape}, Target: {features_np_target.shape}')
+            
+            if not pca_fitted and fitting_batch_count < max_fitting_batches:
+                # Phase 1: Collect batches for PCA fitting
+                fitting_batches_src.append(features_np_source)
+                fitting_batches_tgt.append(features_np_target)
+                fitting_batch_count += 1
+                print(f"Collecting batch {fitting_batch_count}/{max_fitting_batches} for PCA fitting...")
+                
+                if fitting_batch_count == max_fitting_batches:
+                    # Fit incremental PCA on collected batches
+                    print("Fitting Incremental PCA on collected batches...")
+                    for batch in fitting_batches_src:
+                        pca_src.partial_fit(batch)
+                    for batch in fitting_batches_tgt:
+                        pca_tgt.partial_fit(batch)
+                    
+                    # Transform and save the fitting batches
+                    print("Transforming and saving fitting batches...")
+                    for batch in fitting_batches_src:
+                        batch_pca = pca_src.transform(batch)
+                        
+                        if features_dataset_source is None:
+                            features_dataset_source = features_h5_source.create_dataset(
+                                'features', data=batch_pca,
+                                maxshape=(None,) + batch_pca.shape[1:], chunks=True
+                            )
+                        else:
+                            features_dataset_source.resize(features_dataset_source.shape[0] + batch_pca.shape[0], axis=0)
+                            features_dataset_source[-batch_pca.shape[0]:] = batch_pca
+                    
+                                        
+                    for batch in fitting_batches_tgt:
+                        batch_pca = pca_tgt.transform(batch)
+                        
+                        if features_dataset_target is None:
+                            features_dataset_target = features_h5_target.create_dataset(
+                                'features', data=batch_pca,
+                                maxshape=(None,) + batch_pca.shape[1:], chunks=True
+                            )
+                        else:
+                            features_dataset_target.resize(features_dataset_target.shape[0] + batch_pca.shape[0], axis=0)
+                            features_dataset_target[-batch_pca.shape[0]:] = batch_pca
+                    
+                    # Clear fitting data and mark as fitted
+                    del fitting_batches_src, fitting_batches_tgt
+                    pca_fitted = True
+                    
+                    explained_var_src = np.sum(pca_src.explained_variance_ratio_)
+                    explained_var_tgt = np.sum(pca_tgt.explained_variance_ratio_)
+                    print("Phase 1 PCA fitting completed.")
+                    print(f"PCA fitted! Explained variance - Source: {explained_var_src:.4f}, Target: {explained_var_tgt:.4f}")
+                    print(f"Compression: {features_np_source.shape[1]} -> {pca_components} dimensions")
+            
+            elif pca_fitted:
+                print("Begin Phase 2 PCA")
+                # Phase 2: Transform current batch and save immediately
+                features_src_pca = pca_src.transform(features_np_source)
+                features_tgt_pca = pca_tgt.transform(features_np_target)
+                
+                # Update PCA incrementally with current batch
+                pca_src.partial_fit(features_np_source)
+                pca_tgt.partial_fit(features_np_target)
+                
+                # Save compressed features
+                features_dataset_source.resize(features_dataset_source.shape[0] + features_src_pca.shape[0], axis=0)
+                features_dataset_source[-features_src_pca.shape[0]:] = features_src_pca
+                
+                features_dataset_target.resize(features_dataset_target.shape[0] + features_tgt_pca.shape[0], axis=0)
+                features_dataset_target[-features_tgt_pca.shape[0]:] = features_tgt_pca
+    
+                
+                print(f"Batch {batch_idx+1}: Transformed and saved - "
+                    f"Source: {features_np_source.shape} -> {features_src_pca.shape}, "
+                    f"Target: {features_np_target.shape} -> {features_tgt_pca.shape}")
+        
+            
         grads_g = tape_g.gradient(g_loss, model.generator.trainable_variables)
         gen_optimizer.apply_gradients(zip(grads_g, model.generator.trainable_variables))
         
