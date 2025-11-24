@@ -1008,7 +1008,7 @@ def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, low
     temporal_weight = weights.get('temporal_weight', 0.02)
     frequency_weight = weights.get('frequency_weight', 0.1)
     est_weight = weights.get('est_weight', 0.4)  # Lower default for better adaptation
-    jmmd_weight = weights.get('jmmd_weight', 2.0)  # Higher default for stronger adaptation
+    jmmd_weight = weights.get('domain_weight')  # Higher default for stronger adaptation
     
     # Initialize NORMALIZED JMMD loss
     jmmd_loss_fn = JMMDLossNormalized(normalize_features=normalize_features, 
@@ -2503,19 +2503,23 @@ class DeeperPix2PixGenerator(tf.keras.Model):
             activation='tanh', kernel_regularizer=kernel_regularizer
         )
             
-    def call(self, x, training=False, return_features=False):
+    def call(self, x, training=False, return_features=False, depth='deep'): # depth ='deep' or 'deeper'
         # Enhanced Encoder with multiple abstraction levels
         d1 = self.down1(x, training=training)              # (65, 14, 32)
-        d1_deep = self.down1_same(d1, training=training)   # (65, 14, 64) - same-shape processing
+        d1_deep = self.down1_same(d1, training=training) if depth=='deeper' else d1
+        # (65, 14, 64 or 32) - same-shape processing
         
         d2 = self.down2(d1_deep, training=training)        # (32, 14, 64) 
-        d2_deep = self.down2_same(d2, training=training)   # (32, 14, 128) - same-shape processing
+        d2_deep = self.down2_same(d2, training=training) if depth=='deeper' else d2
+        # (32, 14, 128 or 64) - same-shape processing
         
         d3 = self.down3(d2_deep, training=training)        # (15, 14, 128)
-        d3_deep = self.down3_same(d3, training=training)   # (15, 14, 256) - same-shape processing
+        d3_deep = self.down3_same(d3, training=training) if depth=='deeper' else d3
+        # (15, 14, 256 or 128) - same-shape processing  
         
         d4 = self.down4(d3_deep, training=training)        # (7, 14, 256)
-        d4_deep1 = self.down4_same1(d4, training=training) # (7, 14, 512) - deep bottleneck
+        d4_deep1 = self.down4_same1(d4, training=training) if depth=='deeper' else d4  
+                # (7, 14, 512) - deep bottleneck
         d4_deep2 = self.down4_same2(d4_deep1, training=training) # (7, 14, 512) - deeper
         d4_deep3 = self.down4_same3(d4_deep2, training=training) # (7, 14, 1024) - deepest
         
@@ -2523,15 +2527,15 @@ class DeeperPix2PixGenerator(tf.keras.Model):
         # Bottleneck processing
         u0_proc3 = self.up0_same3(d4_deep3, training=training)  # Process deepest features
         u0_proc2 = self.up0_same2(u0_proc3, training=training)  # Continue processing
-        u0_proc1 = self.up0_same1(u0_proc2, training=training)  # Prepare for skip connection
+        u0_proc1 = self.up0_same1(u0_proc2, training=training) if depth=='deeper' else u0_proc2
         u0 = self.up0(u0_proc1, d3_deep, training=training)     # Skip from d3_deep
         
         # Level 3 reconstruction
-        u1_proc = self.up1_same(u0, training=training)          # Process concat features
+        u1_proc = self.up1_same(u0, training=training) if depth=='deeper' else u0          # Process concat features
         u1 = self.up1(u1_proc, d2_deep, training=training)      # Skip from d2_deep
         
         # Level 2 reconstruction  
-        u2_proc = self.up2_same(u1, training=training)          # Process concat features
+        u2_proc = self.up2_same(u1, training=training) if depth=='deeper' else u1          # Process concat features
         u2 = self.up2(u2_proc, d1_deep, training=training)      # Skip from d1_deep
         
         # Final output
