@@ -719,7 +719,7 @@ def train_step_wgan_gp_jmmd_new(model, loader_H, loss_fn, optimizers, lower_rang
     temporal_weight = weights.get('temporal_weight', 0.0)
     frequency_weight = weights.get('frequency_weight', 0.0)
     est_weight = weights.get('est_weight', 1.0)
-    jmmd_weight = weights.get('jmmd_weight', 0.5)
+    jmmd_weight = weights.get('domain_weight')
     
     # Initialize JMMD loss
     jmmd_loss_fn = JMMDLoss()
@@ -737,7 +737,7 @@ def train_step_wgan_gp_jmmd_new(model, loader_H, loss_fn, optimizers, lower_rang
         pca_tgt = IncrementalPCA(n_components=pca_components, batch_size=64)
         pca_fitted = False
         fitting_batch_count = 0
-        max_fitting_batches = 128//batch_size  # Use first batches to fit PCA
+        max_fitting_batches = 3 #128//batch_size  # Use first batches to fit PCA
         
         # Storage for fitting batches (temporary)
         fitting_batches_src = []
@@ -885,10 +885,10 @@ def train_step_wgan_gp_jmmd_new(model, loader_H, loss_fn, optimizers, lower_rang
                 if fitting_batch_count == max_fitting_batches:
                     # Fit incremental PCA on collected batches
                     print("Fitting Incremental PCA on collected batches...")
-                    for batch in fitting_batches_src:
-                        pca_src.partial_fit(batch)
-                    for batch in fitting_batches_tgt:
-                        pca_tgt.partial_fit(batch)
+                    fitting_data_src = np.vstack(fitting_batches_src)  # (.., 100352) 
+                    fitting_data_tgt = np.vstack(fitting_batches_tgt) 
+                    pca_src.partial_fit(fitting_data_src)  
+                    pca_tgt.partial_fit(fitting_data_tgt) 
                     
                     # Transform and save the fitting batches
                     print("Transforming and saving fitting batches...")
@@ -1008,7 +1008,7 @@ def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, low
     temporal_weight = weights.get('temporal_weight', 0.02)
     frequency_weight = weights.get('frequency_weight', 0.1)
     est_weight = weights.get('est_weight', 0.4)  # Lower default for better adaptation
-    jmmd_weight = weights.get('jmmd_weight', 2.0)  # Higher default for stronger adaptation
+    jmmd_weight = weights.get('domain_weight')  # Higher default for stronger adaptation
     
     # Initialize NORMALIZED JMMD loss
     jmmd_loss_fn = JMMDLossNormalized(normalize_features=normalize_features, 
@@ -1691,7 +1691,7 @@ def val_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, lower_range, nsym
     temporal_weight = weights.get('temporal_weight', 0.0)
     frequency_weight = weights.get('frequency_weight', 0.0)
     est_weight = weights.get('est_weight', 1.0)
-    jmmd_weight = weights.get('jmmd_weight', 0.5)
+    jmmd_weight = weights.get('domain_weight')
     
     loader_H_input_val_source, loader_H_true_val_source, loader_H_input_val_target, loader_H_true_val_target = loader_H
     loss_fn_est, loss_fn_bce = loss_fn[:2]  # Only need first two loss functions
@@ -1911,7 +1911,7 @@ def train_step_wgan_gp_source_only(model, loader_H, loss_fn, optimizers, lower_r
     adv_weight = weights.get('adv_weight', 0.01)
     temporal_weight = weights.get('temporal_weight', 0.0)
     frequency_weight = weights.get('frequency_weight', 0.0)
-    est_weight = weights.get('est_weight', 1.0)
+    est_weight = weights.get('est_weight')
     
     epoc_loss_g = 0.0
     epoc_loss_d = 0.0
@@ -2714,3 +2714,91 @@ def save_checkpoint_jmmd(model, save_model, model_path, sub_folder, epoch, metri
     if domain_weight!=0:
         figLoss(line_list=[(metrics['train_domain_loss'], 'Training'), (metrics['val_domain_disc_loss'], 'Validating')], xlabel='Epoch', ylabel='Domain Loss',
                 title='Training and Validating Domain Loss', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Loss_domain')
+
+
+class SimplePix2PixGenerator(tf.keras.Model):
+    """
+    Simple Pix2Pix generator WITHOUT skip connections (vanilla GAN architecture)
+    Same kernel sizes, strides, and layer structure as your U-Net but without skip connections
+    """
+    def __init__(self, output_channels=2, n_subc=132, gen_l2=None, extract_layers=['d2', 'd3', 'd4']):
+        super().__init__()
+        kernel_regularizer = tf.keras.regularizers.l2(gen_l2) if gen_l2 is not None else None
+        self.extract_layers = extract_layers
+        
+        # ===== ENCODER (Same as your U-Net) =====
+        self.down1 = UNetBlock(32, apply_dropout=False, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+        self.down2 = UNetBlock(64, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        self.down3 = UNetBlock(128, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+        self.down4 = UNetBlock(256, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)  # Bottleneck
+        
+        # ===== DECODER (NO SKIP CONNECTIONS) =====
+        # Simple upsampling blocks without skip connections
+        self.up1 = SimpleUpBlock(128, apply_dropout=True, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        self.up2 = SimpleUpBlock(64, apply_dropout=True, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+        self.up3 = SimpleUpBlock(32, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        
+        # Final output layer
+        self.last = tf.keras.layers.Conv2DTranspose(output_channels, kernel_size=(4,3), strides=(2,1), padding='valid',
+                                                    activation='tanh', kernel_regularizer=kernel_regularizer)
+            
+    def call(self, x, training=False, return_features=False):
+        # ===== ENCODER =====
+        d1 = self.down1(x, training=training)      # (batch, 65, 14, 32)
+        d2 = self.down2(d1, training=training)     # (batch, 32, 14, 64)
+        d3 = self.down3(d2, training=training)     # (batch, 15, 14, 128)
+        d4 = self.down4(d3, training=training)     # (batch, 7, 14, 256) - Bottleneck
+        
+        # ===== DECODER (NO SKIP CONNECTIONS) =====
+        u1 = self.up1(d4, training=training)       # (batch, 15, 14, 128) - NO skip from d3
+        u2 = self.up2(u1, training=training)       # (batch, 32, 14, 64)  - NO skip from d2
+        u3 = self.up3(u2, training=training)       # (batch, 65, 14, 32)  - NO skip from d1
+        u4 = self.last(u3)                         # (batch, 132, 14, 2)
+        
+        if u4.shape[2] > 14:
+            u4 = u4[:, :, 1:15, :]
+            
+        # Feature extraction (same as your U-Net)
+        features = []
+        layer_map = {
+            'd1': d1, 'd2': d2, 'd3': d3, 'd4': d4,
+            'u1': u1, 'u2': u2, 'u3': u3
+        }
+        
+        for layer_name in self.extract_layers:
+            if layer_name in layer_map:
+                layer_tensor = layer_map[layer_name]
+                features.append(tf.reshape(layer_tensor, [tf.shape(layer_tensor)[0], -1]))
+                
+        return u4, features
+
+
+class SimpleUpBlock(tf.keras.layers.Layer):
+    """
+    Simple upsampling block WITHOUT skip connections
+    Same as UNetUpBlock but removes the concatenation with skip connection
+    """
+    def __init__(self, filters, apply_dropout=False, kernel_size=(4,3), strides=(2,1), gen_l2=None):
+        super().__init__()
+        kernel_regularizer = tf.keras.regularizers.l2(gen_l2) if gen_l2 is not None else None
+        
+        self.deconv = tf.keras.layers.Conv2DTranspose(filters, kernel_size=kernel_size, strides=strides,
+                                                        padding='valid', kernel_regularizer=kernel_regularizer)
+        self.norm = InstanceNormalization()
+        self.dropout = tf.keras.layers.Dropout(0.3) if apply_dropout else None
+
+    def call(self, x, training):
+        # NO skip connection parameter - just process input directly
+        x = self.deconv(x)
+        
+        # Handle width adjustment (same as your U-Net)
+        if x.shape[2] > 14: 
+            x = x[:, :, 1:15, :]
+            
+        x = self.norm(x, training=training)
+        x = tf.nn.relu(x)
+        
+        if self.dropout:
+            x = self.dropout(x, training=training)
+            
+        return x
