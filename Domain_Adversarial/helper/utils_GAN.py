@@ -339,7 +339,7 @@ def train_step_gan(model, domain_model, loader_H, loss_fn, optimizers, lower_ran
                 domain_labels_tgt = tf.zeros((features_tgt.shape[0], 1))
                 domain_labels = tf.concat([domain_labels_src, domain_labels_tgt], axis=0)
                 domain_pred = domain_model(features_grl, training=True)
-                domain_loss_grl = loss_fn_domain(domain_labels, domain_pred)
+                domain_loss_grl = loss_fn_domain(domain_labels, domain_pred) /2.0
             else:
                 domain_loss_grl = 0.0
             
@@ -363,7 +363,7 @@ def train_step_gan(model, domain_model, loader_H, loss_fn, optimizers, lower_ran
                 features = tf.concat([features_src, features_tgt], axis=0)
                 domain_labels = tf.concat([domain_labels_src, domain_labels_tgt], axis=0)
                 domain_pred = domain_model(features, training=True)
-                domain_loss = loss_fn_domain(domain_labels, domain_pred)
+                domain_loss = loss_fn_domain(domain_labels, domain_pred) /2.0
                 if domain_model.losses:
                     domain_loss += tf.add_n(domain_model.losses)
             grads_domain = tape_domain.gradient(domain_loss, domain_model.trainable_variables)
@@ -522,7 +522,7 @@ def val_step(model, domain_model, loader_H, loss_fn, lower_range, nsymb=14, adv_
             domain_labels_tgt = np.zeros((features_tgt.shape[0], 1))
             domain_labels = np.concatenate([domain_labels_src, domain_labels_tgt], axis=0)
             domain_pred = domain_model(features, training=False)
-            domain_loss = loss_fn_domain(domain_labels, domain_pred).numpy() * features.shape[0]
+            domain_loss = loss_fn_domain(domain_labels, domain_pred).numpy() * features.shape[0] /2.0
             epoc_domain_disc_loss += domain_loss
             # Accuracy (source)
             domain_pred_src = domain_model(features_src, training=False)
@@ -705,7 +705,7 @@ def train_step_wgan_gp(model, domain_model, loader_H, loss_fn, optimizers, lower
                 domain_labels_tgt = tf.zeros((features_tgt.shape[0], 1))
                 domain_labels = tf.concat([domain_labels_src, domain_labels_tgt], axis=0)
                 domain_pred = domain_model(features_grl, training=True)
-                domain_loss_grl = loss_fn_domain(domain_labels, domain_pred)
+                domain_loss_grl = loss_fn_domain(domain_labels, domain_pred) / 2.0
             else:
                 domain_loss_grl = 0.0
             
@@ -733,7 +733,7 @@ def train_step_wgan_gp(model, domain_model, loader_H, loss_fn, optimizers, lower
                 domain_labels = tf.concat([domain_labels_src, domain_labels_tgt], axis=0)
                 
                 domain_pred = domain_model(features, training=True)
-                domain_loss = loss_fn_domain(domain_labels, domain_pred)
+                domain_loss = loss_fn_domain(domain_labels, domain_pred) / 2.0
                 if domain_model.losses: # Add L2 regularization loss
                     domain_loss += tf.add_n(domain_model.losses)
             grads_domain = tape_domain.gradient(domain_loss, domain_model.trainable_variables)
@@ -892,7 +892,7 @@ def val_step_wgan_gp(model, domain_model, loader_H, loss_fn, lower_range, nsymb=
             domain_labels_tgt = np.zeros((features_tgt.shape[0], 1))
             domain_labels = np.concatenate([domain_labels_src, domain_labels_tgt], axis=0)
             domain_pred = domain_model(features, training=False)
-            domain_loss = loss_fn_domain(domain_labels, domain_pred).numpy() * features.shape[0]
+            domain_loss = loss_fn_domain(domain_labels, domain_pred).numpy() * features.shape[0] / 2.0
             epoc_domain_disc_loss += domain_loss
             # Accuracy (source)
             domain_pred_src = domain_model(features_src, training=False)
@@ -1115,7 +1115,7 @@ def train_step_wgan_gp_normalized(model, domain_model, loader_H, loss_fn, optimi
                 domain_labels_tgt = tf.zeros((features_tgt.shape[0], 1))
                 domain_labels = tf.concat([domain_labels_src, domain_labels_tgt], axis=0)
                 domain_pred = domain_model(features_grl, training=True)
-                domain_loss_grl = loss_fn_domain(domain_labels, domain_pred)
+                domain_loss_grl = loss_fn_domain(domain_labels, domain_pred) /2.0
             else:
                 domain_loss_grl = 0.0
             
@@ -1150,7 +1150,7 @@ def train_step_wgan_gp_normalized(model, domain_model, loader_H, loss_fn, optimi
                 domain_labels = tf.concat([domain_labels_src, domain_labels_tgt], axis=0)
                 
                 domain_pred = domain_model(features, training=True)
-                domain_loss = loss_fn_domain(domain_labels, domain_pred)
+                domain_loss = loss_fn_domain(domain_labels, domain_pred) / 2.0
                 if domain_model.losses:
                     domain_loss += tf.add_n(domain_model.losses)
             grads_domain = tape_domain.gradient(domain_loss, domain_model.trainable_variables)
@@ -1319,7 +1319,7 @@ def val_step_wgan_gp_normalized(model, domain_model, loader_H, loss_fn, lower_ra
             domain_labels_tgt = np.zeros((features_tgt.shape[0], 1))
             domain_labels = np.concatenate([domain_labels_src, domain_labels_tgt], axis=0)
             domain_pred = domain_model(features, training=False)
-            domain_loss = loss_fn_domain(domain_labels, domain_pred).numpy() * features.shape[0]
+            domain_loss = loss_fn_domain(domain_labels, domain_pred).numpy() * features.shape[0] / 2.0
             epoc_domain_disc_loss += domain_loss
             
             # Accuracy (source) - use normalized features if enabled
