@@ -243,16 +243,16 @@ class WeightScheduler:
         
         if strategy == 'reconstruction_first':
             # Domain scheduling parameters
-            self.start_domain_weight = kwargs.get('start_domain_weight', 0.01)
-            self.end_domain_weight = kwargs.get('end_domain_weight', 0.05)
+            self.start_domain_weight = kwargs.get('start_domain_weight', 0.5)
+            self.end_domain_weight = kwargs.get('end_domain_weight', 1.5)
             self.warmup_epochs = kwargs.get('warmup_epochs', 150)
             self.schedule_type = kwargs.get('schedule_type', 'linear')  # 'linear', 'cosine', 'exponential'
             
             # Other weight parameters for reconstruction_first
             self.start_est_weight = kwargs.get('start_est_weight', 1.0)
             self.end_est_weight = kwargs.get('end_est_weight', 1.0)  # Can be different if desired
-            self.start_adv_weight = kwargs.get('start_adv_weight', 0.01)
-            self.end_adv_weight = kwargs.get('end_adv_weight', 0.01)  # Can be different if desired
+            self.start_adv_weight = kwargs.get('start_adv_weight', 0.005)
+            self.end_adv_weight = kwargs.get('end_adv_weight', 0.005)  # Can be different if desired
             
             print(f"WeightScheduler initialized with reconstruction_first strategy:")
             print(f"  - Domain weight: {self.start_domain_weight} → {self.end_domain_weight}")

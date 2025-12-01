@@ -238,6 +238,154 @@ class DomainDisc(tf.keras.Model):
         x = self.pool(x)   # (batch, 64)
         x = self.fc1(x)    # (batch, 64)
         return self.out(x) # (batch, 1) - domain probability
+    
+class WeightScheduler:
+    def __init__(self, strategy='domain_first_smooth', **kwargs):  
+                    # strategy = 'domain_first_smooth' or 'reconstruction_first'
+        self.strategy = strategy
+        
+        # Common parameters for both strategies
+        self.temporal_weight = kwargs.get('temporal_weight', 0.02)
+        self.frequency_weight = kwargs.get('frequency_weight', 0.1)
+        
+        if strategy == 'reconstruction_first':
+            # Domain scheduling parameters
+            self.start_domain_weight = kwargs.get('start_domain_weight', 0.01)
+            self.end_domain_weight = kwargs.get('end_domain_weight', 0.08)
+            self.warmup_epochs = kwargs.get('warmup_epochs', 150)
+            self.schedule_type = kwargs.get('schedule_type', 'linear')  # 'linear', 'cosine', 'exponential'
+            
+            # Other weight parameters for reconstruction_first
+            self.start_est_weight = kwargs.get('start_est_weight', 1.0)
+            self.end_est_weight = kwargs.get('end_est_weight', 1.0)  # Can be different if desired
+            self.start_adv_weight = kwargs.get('start_adv_weight', 0.005)
+            self.end_adv_weight = kwargs.get('end_adv_weight', 0.005)  # Can be different if desired
+            
+            print(f"WeightScheduler initialized with reconstruction_first strategy:")
+            print(f"  - Domain weight: {self.start_domain_weight} → {self.end_domain_weight}")
+            print(f"  - Est weight: {self.start_est_weight} → {self.end_est_weight}")
+            print(f"  - Adv weight: {self.start_adv_weight} → {self.end_adv_weight}")
+            print(f"  - Warmup epochs: {self.warmup_epochs}")
+            print(f"  - Schedule type: {self.schedule_type}")
+            
+        elif strategy == 'domain_first_smooth':
+            # Domain scheduling parameters for domain_first_smooth
+            self.start_domain_weight = kwargs.get('start_domain_weight', 0.1)  # High start (4.5)
+            self.end_domain_weight = kwargs.get('end_domain_weight', 0.01)     # Low end (1.5)
+            
+            # Est weight parameters for domain_first_smooth
+            self.start_est_weight = kwargs.get('start_est_weight', 0.1)       # Low start (0.1)
+            self.end_est_weight = kwargs.get('end_est_weight', 1)           # High end (0.6)
+            
+            # Adv weight parameters for domain_first_smooth
+            self.start_adv_weight = kwargs.get('start_adv_weight', 0.005)      # Low start (0.03)
+            self.end_adv_weight = kwargs.get('end_adv_weight', 0.005)          # High end (0.08)
+            
+            print(f"WeightScheduler initialized with domain_first_smooth strategy:")
+            print(f"  - Domain weight: {self.start_domain_weight} → {self.end_domain_weight}")
+            print(f"  - Est weight: {self.start_est_weight} → {self.end_est_weight}")
+            print(f"  - Adv weight: {self.start_adv_weight} → {self.end_adv_weight}")
+    
+    def get_weights(self, epoch, n_epochs):
+        """
+        Get complete weights dictionary based on selected strategy
+        
+        Args:
+            epoch: Current epoch (0-based)
+            n_epochs: Total number of epochs
+            
+        Returns:
+            weights: Dictionary with all weight values
+        """
+        if self.strategy == 'domain_first_smooth':
+            return self.get_weights_domain_first_smooth(epoch, n_epochs)
+        elif self.strategy == 'reconstruction_first':
+            return self.get_weights_reconstruction_first(epoch, n_epochs)
+        else:
+            raise ValueError(f"Unknown strategy: {self.strategy}. Available: 'domain_first_smooth', 'reconstruction_first'")
+    
+    def get_weights_domain_first_smooth(self, epoch, n_epochs):
+        """
+        Domain-first with smooth sigmoid transitions (YOUR ORIGINAL STRATEGY)
+        HIGH domain weight early -> LOW domain weight later
+        Now supports customizable start/end weights for all parameters
+        """
+        import math
+        progress = epoch / n_epochs
+        
+        # Domain weight: High early, smooth decay (customizable range)
+        domain_factor = 1.0 / (1 + math.exp(15 * (progress - 0.4)))  # Smooth decline
+        domain_weight = self.end_domain_weight + (self.start_domain_weight - self.end_domain_weight) * domain_factor
+        
+        # Estimation weight: Low early, smooth rise (customizable range)
+        est_factor = 1.0 / (1 + math.exp(-12 * (progress - 0.5)))  # Smooth rise
+        est_weight = self.start_est_weight + (self.end_est_weight - self.start_est_weight) * est_factor
+        
+        # Adversarial: Moderate throughout (customizable range)
+        adv_weight = self.start_adv_weight + (self.end_adv_weight - self.start_adv_weight) * (1 - domain_factor)
+        
+        return {
+            'adv_weight': adv_weight,
+            'est_weight': est_weight,
+            'domain_weight': domain_weight,
+            'temporal_weight': self.temporal_weight,
+            'frequency_weight': self.frequency_weight,
+        }
+    
+    def get_weights_reconstruction_first(self, epoch, n_epochs):
+        """
+        Reconstruction-first approach (ANTI-NEGATIVE TRANSFER)
+        LOW domain weight early -> HIGH domain weight later
+        Now returns complete weights dictionary like domain_first_smooth
+        """
+        # Get gradual weights for all parameters
+        current_domain_weight = self._get_gradual_weight(
+            epoch, n_epochs, self.start_domain_weight, self.end_domain_weight
+        )
+        current_est_weight = self._get_gradual_weight(
+            epoch, n_epochs, self.start_est_weight, self.end_est_weight
+        )
+        current_adv_weight = self._get_gradual_weight(
+            epoch, n_epochs, self.start_adv_weight, self.end_adv_weight
+        )
+        
+        return {
+            'adv_weight': current_adv_weight,
+            'est_weight': current_est_weight,
+            'domain_weight': current_domain_weight,
+            'temporal_weight': self.temporal_weight,
+            'frequency_weight': self.frequency_weight,
+        }
+    
+    def _get_gradual_weight(self, epoch, n_epochs, start_weight, end_weight):
+        """
+        Helper function for gradual weight scheduling (generalized for any weight type)
+        """
+        if epoch < self.warmup_epochs:
+            # Gradual change during warmup
+            progress = epoch / self.warmup_epochs
+            
+            if self.schedule_type == 'linear':
+                # Linear change: smooth and predictable
+                weight = start_weight + (end_weight - start_weight) * progress
+            elif self.schedule_type == 'cosine':
+                # Cosine schedule: slower start, faster middle, slower end
+                import math
+                weight = start_weight + (end_weight - start_weight) * (1 - math.cos(progress * math.pi)) / 2
+            else:  # exponential
+                # Exponential: very slow start, rapid change later
+                import math
+                if end_weight > 0 and start_weight > 0:
+                    weight = start_weight * (end_weight / start_weight) ** progress
+                else:
+                    # Fallback to linear if weights can be zero
+                    weight = start_weight + (end_weight - start_weight) * progress
+        else:
+            # Maintain final weight after warmup
+            weight = end_weight
+        
+        return weight
+
 
 # ================= GAN Training Step =====================
 def train_step_gan(model, domain_model, loader_H, loss_fn, optimizers, lower_range=-1, return_features=False,
