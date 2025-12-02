@@ -38,7 +38,7 @@ SNR = -5
 # source_data_file_path_label = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'OpenNTN','H_perfect.mat'))
 # target_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'OpenNTN', f'SNR_{SNR}dB','sionnaNTN.mat'))
 target_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'MATLAB', 'TDL_B_100_300_simple', f'SNR_{SNR}dB','matlabNTN.mat'))
-source_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'MATLAB', 'TDL_A_300_simple', f'SNR_{SNR}dB','matlabNTN.mat'))
+source_data_file_path = os.path.abspath(os.path.join(notebook_dir, '..', 'generatedChan', 'MATLAB', 'TDL_D_30_simple', f'SNR_{SNR}dB','matlabNTN.mat'))
 
 norm_approach = 'minmax' # can be set to 'std'
 lower_range = -1 
@@ -154,9 +154,9 @@ loss_fn_domain = tf.keras.losses.BinaryCrossentropy()  # Domain classification l
 load_checkpoint = False  # True if continue training
 if load_checkpoint:
     # model_path = notebook_dir + '/model/GAN_cal/ver' + str(idx_save_path-1) + '_' # or replace idx_save_path-1 by the desired folder index
-    model_path = notebook_dir + f'/model/GAN_cal/{SNR}_dB/ver' + str(idx_save_path-1) + '_'
+    model_path = notebook_dir + f'/model/GAN_test/{SNR}_dB/ver' + str(idx_save_path-1) + '_'
 else:
-    model_path = notebook_dir + f'/model/GAN_cal/{SNR}_dB/ver' + str(idx_save_path) + '_'
+    model_path = notebook_dir + f'/model/GAN_test/{SNR}_dB/ver' + str(idx_save_path) + '_'
 if load_checkpoint:
     start_epoch = 3  # This is the epoch we want to CONTINUE FROM (not load from)
 else:
