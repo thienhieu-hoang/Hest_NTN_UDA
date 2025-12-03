@@ -105,13 +105,14 @@ class UNetBlock(tf.keras.layers.Layer):
         return x
     
 class UNetUpBlock(tf.keras.layers.Layer):
-    def __init__(self, filters, apply_dropout=False, kernel_size=(4,3), strides=(2,1), gen_l2=None):
+    def __init__(self, filters, apply_dropout=False, kernel_size=(4,3), 
+                strides=(2,1), gen_l2=None, dropOut_rate=0.3):
         super().__init__()
         kernel_regularizer = tf.keras.regularizers.l2(gen_l2) if gen_l2 is not None else None
         self.deconv = tf.keras.layers.Conv2DTranspose(filters, kernel_size=kernel_size, strides=strides,
                                                         padding='valid', kernel_regularizer=kernel_regularizer)
         self.norm = InstanceNormalization()
-        self.dropout = tf.keras.layers.Dropout(0.3) if apply_dropout else None
+        self.dropout = tf.keras.layers.Dropout(dropOut_rate) if apply_dropout else None
 
     def call(self, x, skip, training):
         x = self.deconv(x)
@@ -125,7 +126,8 @@ class UNetUpBlock(tf.keras.layers.Layer):
         return x
 
 class Pix2PixGenerator(tf.keras.Model):
-    def __init__(self, output_channels=2, n_subc=132, gen_l2=None, extract_layers=['d2', 'd3', 'd4']):
+    def __init__(self, output_channels=2, n_subc=132, gen_l2=None, 
+                dropOut_layers=['u1', 'u2'], dropOut_rate=0.3, extract_layers=['d2', 'd3', 'd4']):
         super().__init__()
         kernel_regularizer = tf.keras.regularizers.l2(gen_l2) if gen_l2 is not None else None
         self.extract_layers = extract_layers
@@ -135,9 +137,18 @@ class Pix2PixGenerator(tf.keras.Model):
         self.down3 = UNetBlock(128, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
         self.down4 = UNetBlock(256, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
         # Decoder
-        self.up1 = UNetUpBlock(128, apply_dropout=True, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
-        self.up2 = UNetUpBlock(64, apply_dropout=True, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
-        self.up3 = UNetUpBlock(32, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        self.up1 = UNetUpBlock(128, 
+                              apply_dropout='u1' in dropOut_layers,  # True if 'u1' in list
+                              kernel_size=(3,3), strides=(2,1), 
+                              gen_l2=gen_l2, dropOut_rate=dropOut_rate)
+        self.up2 = UNetUpBlock(64, 
+                              apply_dropout='u2' in dropOut_layers,  # True if 'u2' in list
+                              kernel_size=(4,3), strides=(2,1), 
+                              gen_l2=gen_l2, dropOut_rate=dropOut_rate)
+        self.up3 = UNetUpBlock(32, 
+                              apply_dropout='u3' in dropOut_layers,  # True if 'u3' in list
+                              kernel_size=(3,3), strides=(2,1), 
+                              gen_l2=gen_l2, dropOut_rate=dropOut_rate)
         self.last = tf.keras.layers.Conv2DTranspose(output_channels, kernel_size=(4,3), strides=(2,1), padding='valid',
                                                     activation='tanh', kernel_regularizer=kernel_regularizer)
             
@@ -217,8 +228,22 @@ class GAN_Output:
 class GAN(tf.keras.Model):
     def __init__(self, n_subc=132, generator=Pix2PixGenerator, discriminator=PatchGANDiscriminator, gen_l2=None, disc_l2=None, extract_layers=['d2', 'd3','d4']):
         super().__init__()
-        self.generator = generator(n_subc=n_subc, gen_l2=gen_l2, extract_layers=extract_layers)
-        self.discriminator = discriminator(n_subc=n_subc, disc_l2=disc_l2)
+        
+        # Check if generator is already initialized (instance) or just a class
+        if isinstance(generator, tf.keras.Model):
+            # Already initialized - use directly
+            self.generator = generator
+            print("Using pre-initialized generator")
+        else:
+            self.generator = generator(n_subc=n_subc, gen_l2=gen_l2, extract_layers=extract_layers)
+            
+        # Check if discriminator is already initialized (instance) or just a class  
+        if isinstance(discriminator, tf.keras.Model):
+            # Already initialized - use directly
+            self.discriminator = discriminator
+            print("Using pre-initialized discriminator")
+        else:    
+            self.discriminator = discriminator(n_subc=n_subc, disc_l2=disc_l2)
 
     def call(self, inputs, training=False):
         # Optionally implement a forward pass if needed
