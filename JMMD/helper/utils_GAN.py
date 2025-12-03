@@ -138,17 +138,17 @@ class Pix2PixGenerator(tf.keras.Model):
         self.down4 = UNetBlock(256, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
         # Decoder
         self.up1 = UNetUpBlock(128, 
-                              apply_dropout='u1' in dropOut_layers,  # True if 'u1' in list
-                              kernel_size=(3,3), strides=(2,1), 
-                              gen_l2=gen_l2, dropOut_rate=dropOut_rate)
+                            apply_dropout='u1' in dropOut_layers,  # True if 'u1' in list
+                            kernel_size=(3,3), strides=(2,1), 
+                            gen_l2=gen_l2, dropOut_rate=dropOut_rate)
         self.up2 = UNetUpBlock(64, 
-                              apply_dropout='u2' in dropOut_layers,  # True if 'u2' in list
-                              kernel_size=(4,3), strides=(2,1), 
-                              gen_l2=gen_l2, dropOut_rate=dropOut_rate)
+                            apply_dropout='u2' in dropOut_layers,  # True if 'u2' in list
+                            kernel_size=(4,3), strides=(2,1), 
+                            gen_l2=gen_l2, dropOut_rate=dropOut_rate)
         self.up3 = UNetUpBlock(32, 
-                              apply_dropout='u3' in dropOut_layers,  # True if 'u3' in list
-                              kernel_size=(3,3), strides=(2,1), 
-                              gen_l2=gen_l2, dropOut_rate=dropOut_rate)
+                            apply_dropout='u3' in dropOut_layers,  # True if 'u3' in list
+                            kernel_size=(3,3), strides=(2,1), 
+                            gen_l2=gen_l2, dropOut_rate=dropOut_rate)
         self.last = tf.keras.layers.Conv2DTranspose(output_channels, kernel_size=(4,3), strides=(2,1), padding='valid',
                                                     activation='tanh', kernel_regularizer=kernel_regularizer)
             
@@ -644,7 +644,7 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
     temporal_weight = weights.get('temporal_weight', 0.0)
     frequency_weight = weights.get('frequency_weight', 0.0)
     est_weight = weights.get('est_weight', 1.0)
-    jmmd_weight = weights.get('domain_weight')
+    domain_weight = weights.get('domain_weight')
     
     # Initialize JMMD loss
     jmmd_loss_fn = JMMDLoss()
@@ -656,7 +656,7 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
     epoc_loss_jmmd = 0.0
     N_train = 0
     
-    if save_features==True and (jmmd_weight != 0):
+    if save_features==True and (domain_weight != 0):
         features_h5_path_source = 'features_source.h5'
         if os.path.exists(features_h5_path_source):
             os.remove(features_h5_path_source)  # Remove if exists to start fresh
@@ -743,7 +743,7 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
             # Total generator loss
             g_loss = (est_weight * g_est_loss + 
                     adv_weight * g_adv_loss + 
-                    jmmd_weight * jmmd_loss + 
+                    domain_weight * jmmd_loss + 
                     smoothness_loss)
             
             # Add L2 regularization
@@ -751,7 +751,7 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
                 g_loss += tf.add_n(model.generator.losses)
         
         # === 3. Save features (after the bottleneck layer) if required (to calcu PAD) ===
-        if save_features and (jmmd_weight != 0):
+        if save_features and (domain_weight != 0):
             # save features in a temporary file instead of stacking them up, to avoid memory exploding
             features_np_source = features_src[-1].numpy()  # Convert to numpy if it's a tensor
             # print('Feature shape: ', features_np_source.shape)
@@ -790,7 +790,7 @@ def train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizers, lower_range=-1
         epoc_loss_est_tgt += g_est_loss_tgt.numpy() * x_tgt.shape[0]
         epoc_loss_jmmd += jmmd_loss.numpy() * x_src.shape[0]
     # end batch loop
-    if save_features and (jmmd_weight != 0):    
+    if save_features and (domain_weight != 0):    
         features_h5_source.close()
         features_h5_target.close()
     
@@ -824,7 +824,7 @@ def train_step_wgan_gp_jmmd_new(model, loader_H, loss_fn, optimizers, lower_rang
                         loader_H_input_train_tgt, loader_H_true_train_tgt)
         loss_fn: tuple of loss functions (estimation_loss, bce_loss) - no domain loss needed
         optimizers: tuple of (gen_optimizer, disc_optimizer) - no domain optimizer needed
-        jmmd_weight: weight for JMMD loss (replaces domain_weight)
+        domain_weight: weight for JMMD loss (replaces domain_weight)
     """
     loader_H_input_train_src, loader_H_true_train_src, \
         loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
@@ -836,7 +836,7 @@ def train_step_wgan_gp_jmmd_new(model, loader_H, loss_fn, optimizers, lower_rang
     temporal_weight = weights.get('temporal_weight', 0.0)
     frequency_weight = weights.get('frequency_weight', 0.0)
     est_weight = weights.get('est_weight', 1.0)
-    jmmd_weight = weights.get('domain_weight')
+    domain_weight = weights.get('domain_weight')
     
     # Initialize JMMD loss
     jmmd_loss_fn = JMMDLoss()
@@ -848,7 +848,7 @@ def train_step_wgan_gp_jmmd_new(model, loader_H, loss_fn, optimizers, lower_rang
     epoc_loss_jmmd = 0.0
     N_train = 0
     
-    if save_features==True and (jmmd_weight != 0):
+    if save_features==True and (domain_weight != 0):
         # Initialize incremental PCA variables
         pca_src = IncrementalPCA(n_components=pca_components, batch_size=64)
         pca_tgt = IncrementalPCA(n_components=pca_components, batch_size=64)
@@ -946,7 +946,7 @@ def train_step_wgan_gp_jmmd_new(model, loader_H, loss_fn, optimizers, lower_rang
             # Total generator loss
             g_loss = (est_weight * g_est_loss + 
                     adv_weight * g_adv_loss + 
-                    jmmd_weight * jmmd_loss + 
+                    domain_weight * jmmd_loss + 
                     smoothness_loss)
             
             # Add L2 regularization
@@ -954,7 +954,7 @@ def train_step_wgan_gp_jmmd_new(model, loader_H, loss_fn, optimizers, lower_rang
                 g_loss += tf.add_n(model.generator.losses)
         
         # === 3. Save features (after the bottleneck layer) if required (to calcu PAD) ===
-        if save_features and (jmmd_weight != 0):
+        if save_features and (domain_weight != 0):
             # save features in a temporary file instead of stacking them up, to avoid memory exploding
             features_np_source = features_src[-1].numpy()  # Convert to numpy if it's a tensor
             # print('Feature shape: ', features_np_source.shape)
@@ -1075,7 +1075,7 @@ def train_step_wgan_gp_jmmd_new(model, loader_H, loss_fn, optimizers, lower_rang
         epoc_loss_est_tgt += g_est_loss_tgt.numpy() * x_tgt.shape[0]
         epoc_loss_jmmd += jmmd_loss.numpy() * x_src.shape[0]
     # end batch loop
-    if save_features and (jmmd_weight != 0):    
+    if save_features and (domain_weight != 0):    
         features_h5_source.close()
         features_h5_target.close()
     
@@ -1125,7 +1125,7 @@ def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, low
     temporal_weight = weights.get('temporal_weight', 0.02)
     frequency_weight = weights.get('frequency_weight', 0.1)
     est_weight = weights.get('est_weight', 0.4)  # Lower default for better adaptation
-    jmmd_weight = weights.get('domain_weight')  # Higher default for stronger adaptation
+    domain_weight = weights.get('domain_weight')  # Higher default for stronger adaptation
     
     # Initialize NORMALIZED JMMD loss
     jmmd_loss_fn = JMMDLossNormalized(normalize_features=normalize_features, 
@@ -1139,7 +1139,7 @@ def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, low
     epoc_loss_est_tgt = 0.0
     N_train = 0
     
-    if save_features==True and (jmmd_weight != 0):
+    if save_features==True and (domain_weight != 0):
         features_h5_path_source = 'features_source.h5'
         if os.path.exists(features_h5_path_source):
             os.remove(features_h5_path_source)  # Remove if exists to start fresh
@@ -1229,7 +1229,7 @@ def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, low
             # Total generator loss
             g_loss = (est_weight * g_est_loss + 
                     adv_weight * g_adv_loss + 
-                    jmmd_weight * jmmd_loss + 
+                    domain_weight * jmmd_loss + 
                     smoothness_loss)
             
             # Add L2 regularization
@@ -1237,7 +1237,7 @@ def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, low
                 g_loss += tf.add_n(model.generator.losses)
 
         # === 3. Save features (after the bottleneck layer) if required (to calcu PAD) ===
-        if save_features and (jmmd_weight != 0):
+        if save_features and (domain_weight != 0):
             # save features in a temporary file instead of stacking them up, to avoid memory exploding
             features_np_source = features_src[-1].numpy()  # Convert to numpy if it's a tensor
             # print('Feature shape: ', features_np_source.shape)
@@ -1278,7 +1278,7 @@ def train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizers, low
         
             
     # end batch loop
-    if save_features and (jmmd_weight != 0):    
+    if save_features and (domain_weight != 0):    
         features_h5_source.close()
         features_h5_target.close()
 
@@ -1577,7 +1577,7 @@ def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, weigh
         loss_fn: tuple of (estimation loss, binary cross-entropy loss) - no domain loss needed
         lower_range: lower range for min-max scaling
         nsymb: number of symbols
-        adv_weight, est_weight, jmmd_weight: loss weights
+        adv_weight, est_weight, domain_weight: loss weights
         
     Returns:
         H_sample, epoc_eval_return
@@ -1588,7 +1588,7 @@ def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, weigh
     temporal_weight = weights.get('temporal_weight', 0.0)
     frequency_weight = weights.get('frequency_weight', 0.0)
     est_weight = weights.get('est_weight', 1.0)
-    jmmd_weight = weights.get('jmmd_weight', 0.5)
+    domain_weight = weights.get('domain_weight', 0.5)
     
     loader_H_input_val_source, loader_H_true_val_source, loader_H_input_val_target, loader_H_true_val_target = loader_H
     loss_fn_est, loss_fn_bce = loss_fn[:2]  # Only need first two loss functions
@@ -1670,7 +1670,7 @@ def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, weigh
         epoc_gan_disc_loss += d_loss_src.numpy() * x_src.shape[0]
 
         # === JMMD Loss (replaces Domain Discriminator) ===
-        if jmmd_weight > 0:
+        if domain_weight > 0:
             # Compute JMMD loss between source and target features
             jmmd_loss = jmmd_loss_fn(features_src, features_tgt)
             epoc_jmmd_loss += jmmd_loss.numpy() * x_src.shape[0]
@@ -1763,7 +1763,7 @@ def val_step_wgan_gp_jmmd(model, loader_H, loss_fn, lower_range, nsymb=14, weigh
 
     # Weighted total loss (for comparison with training)
     avg_total_loss = est_weight * avg_loss_est + adv_weight * avg_gan_disc_loss \
-                     + jmmd_weight * avg_jmmd_loss + avg_smoothness_loss
+                     + domain_weight * avg_jmmd_loss + avg_smoothness_loss
 
     # Compose epoc_eval_return - Replace domain discriminator loss with JMMD loss
     epoc_eval_return = {
@@ -1797,7 +1797,7 @@ def val_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, lower_range, nsym
         loss_fn: tuple of (estimation loss, binary cross-entropy loss) - no domain loss needed
         lower_range: lower range for min-max scaling
         nsymb: number of symbols
-        adv_weight, est_weight, jmmd_weight: loss weights
+        adv_weight, est_weight, domain_weight: loss weights
         
     Returns:
         H_sample, epoc_eval_return
@@ -1808,7 +1808,7 @@ def val_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, lower_range, nsym
     temporal_weight = weights.get('temporal_weight', 0.0)
     frequency_weight = weights.get('frequency_weight', 0.0)
     est_weight = weights.get('est_weight', 1.0)
-    jmmd_weight = weights.get('domain_weight')
+    domain_weight = weights.get('domain_weight')
     
     loader_H_input_val_source, loader_H_true_val_source, loader_H_input_val_target, loader_H_true_val_target = loader_H
     loss_fn_est, loss_fn_bce = loss_fn[:2]  # Only need first two loss functions
@@ -1890,7 +1890,7 @@ def val_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, lower_range, nsym
         epoc_gan_disc_loss += d_loss_src.numpy() * x_src.shape[0]
 
         # === JMMD Loss (replaces Domain Discriminator) ===
-        if jmmd_weight > 0:
+        if domain_weight > 0:
             # Compute JMMD loss between source and target features
             jmmd_loss = jmmd_loss_fn(features_src, features_tgt)
             epoc_jmmd_loss += jmmd_loss.numpy() * x_src.shape[0]
@@ -1983,7 +1983,7 @@ def val_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, lower_range, nsym
 
     # Weighted total loss (for comparison with training)
     avg_total_loss = est_weight * avg_loss_est + adv_weight * avg_gan_disc_loss \
-                     + jmmd_weight * avg_jmmd_loss + avg_smoothness_loss
+                     + domain_weight * avg_jmmd_loss + avg_smoothness_loss
 
     # Compose epoc_eval_return - Replace domain discriminator loss with JMMD loss
     epoc_eval_return = {
