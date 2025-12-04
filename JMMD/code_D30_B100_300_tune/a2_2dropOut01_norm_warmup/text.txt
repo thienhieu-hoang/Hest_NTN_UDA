@@ -1,0 +1,3 @@
+2 DropOut layers, DropOut rate = 0.1
+Train UDA with Weight Scheduler with warm up duration = 80 epochs
+Original architecture

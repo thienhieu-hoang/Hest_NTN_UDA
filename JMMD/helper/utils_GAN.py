@@ -2485,7 +2485,8 @@ class SameShapeBlock(tf.keras.layers.Layer):
 class ResidualUNetUpBlock(tf.keras.layers.Layer):
     """Enhanced UNet upsampling block with residual connections, similar to original UNetUpBlock"""
     
-    def __init__(self, filters, apply_dropout=False, kernel_size=(4,3), strides=(2,1), gen_l2=None, **kwargs):
+    def __init__(self, filters, apply_dropout=False, dropOut_rate=0.3,
+                 kernel_size=(4,3), strides=(2,1), gen_l2=None, **kwargs):
         super().__init__(**kwargs)
         self.filters = filters
         self.apply_dropout = apply_dropout
@@ -2511,7 +2512,7 @@ class ResidualUNetUpBlock(tf.keras.layers.Layer):
         )
         self.norm3 = InstanceNormalization()
         
-        self.dropout = tf.keras.layers.Dropout(0.3) if apply_dropout else None
+        self.dropout = tf.keras.layers.Dropout(dropOut_rate) if apply_dropout else None
         
         # Channel adjustment for residual connection after concatenation
         self.channel_adjust = tf.keras.layers.Dense(
@@ -2571,7 +2572,9 @@ class ResidualUNetUpBlock(tf.keras.layers.Layer):
 class DeeperPix2PixGenerator(tf.keras.Model):
     """Enhanced Pix2Pix generator with residual blocks and same-shape layers"""
     
-    def __init__(self, output_channels=2, n_subc=132, gen_l2=None, extract_layers=['d4_deep1', 'd4_deep2', 'd4_deep3']):
+    def __init__(self, output_channels=2, n_subc=132, gen_l2=None, 
+                dropOut_layers=['up0', 'up1'], dropOut_rate=0.3, 
+                extract_layers=['d4_deep1', 'd4_deep2', 'd4_deep3']):
         # extract_layers needs to be the correct order (the last one is the deepest layer)
         super().__init__()
         kernel_regularizer = tf.keras.regularizers.l2(gen_l2) if gen_l2 is not None else None
@@ -2603,15 +2606,18 @@ class DeeperPix2PixGenerator(tf.keras.Model):
         self.up0_same3 = SameShapeBlock(512, gen_l2=gen_l2)  # Process deep features
         self.up0_same2 = SameShapeBlock(512, gen_l2=gen_l2)  # Continue processing
         self.up0_same1 = SameShapeBlock(256, gen_l2=gen_l2)  # Prepare for upsampling
-        self.up0 = ResidualUNetUpBlock(256, apply_dropout=True, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        self.up0 = ResidualUNetUpBlock(256, apply_dropout='up0' in dropOut_layers, 
+                                       kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2, dropOut_rate=dropOut_rate)
         
         # Level 3: (15, 14, 256) -> (32, 14, 128)
         self.up1_same = SameShapeBlock(128, gen_l2=gen_l2)   # Process concatenated features
-        self.up1 = ResidualUNetUpBlock(128, apply_dropout=True, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+        self.up1 = ResidualUNetUpBlock(128, apply_dropout='up1' in dropOut_layers, 
+                                       kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2, dropOut_rate=dropOut_rate)
         
         # Level 2: (32, 14, 128) -> (65, 14, 64)
         self.up2_same = SameShapeBlock(64, gen_l2=gen_l2)    # Process concatenated features
-        self.up2 = ResidualUNetUpBlock(64, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        self.up2 = ResidualUNetUpBlock(64, apply_dropout='up2' in dropOut_layers,
+                                       kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2, dropOut_rate=dropOut_rate)
         
         # Final output: (65, 14, 64) -> (132, 14, 2)
         self.last = tf.keras.layers.Conv2DTranspose(
@@ -2694,12 +2700,17 @@ class DeeperGAN(tf.keras.Model):
     def __init__(self, n_subc=132, generator=DeeperPix2PixGenerator, discriminator=PatchGANDiscriminator, 
                 gen_l2=None, disc_l2=None, extract_layers=['d4_deep1', 'd4_deep2', 'd4_deep3']):
         super().__init__()
-            
-        self.generator = generator(
-            n_subc=n_subc, 
-            gen_l2=gen_l2, 
-            extract_layers=extract_layers
-        )
+        
+        if isinstance(generator, tf.keras.Model):
+            # Already initialized - use directly
+            self.generator = generator
+            print("Using pre-initialized generator")
+        else:    
+            self.generator = generator(
+                n_subc=n_subc, 
+                gen_l2=gen_l2, 
+                extract_layers=extract_layers
+            )
         self.discriminator = discriminator(n_subc=n_subc, disc_l2=disc_l2)
 
     def call(self, inputs, training=False):
