@@ -142,7 +142,7 @@ class_dict_target = {
 loss_fn_ce = tf.keras.losses.MeanSquaredError()  # Channel estimation loss (generator loss)
 loss_fn_bce = tf.keras.losses.BinaryCrossentropy(from_logits=False) # Binary cross-entropy loss for discriminator
 
-from JMMD.helper.utils_GAN import GAN, DeeperGAN, Pix2PixGenerator
+from JMMD.helper.utils_GAN import GAN, DeeperGAN, Pix2PixGenerator, MultiScalePix2PixGenerator,AttentionPix2PixGenerator 
 from JMMD.helper.utils_GAN import train_step_wgan_gp_source_only, val_step_wgan_gp_source_only, post_val
 
 import time
@@ -247,7 +247,7 @@ for sub_folder in sub_folder_:
     perform_to_save = {}    # list to save to .mat file for nmse, losses,...
 
     # 
-    generator = Pix2PixGenerator(dropOut_rate=0.1, dropOut_layers=['u1'])
+    generator = AttentionPix2PixGenerator()
     model = GAN(generator=generator, gen_l2=None, disc_l2=1e-5)  # l2 regularization for generator and discriminator
     # 
     gen_optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4, beta_1=0.5, beta_2=0.9)

@@ -2933,3 +2933,182 @@ class SimpleUpBlock(tf.keras.layers.Layer):
             x = self.dropout(x, training=training)
             
         return x
+
+class MultiScalePix2PixGenerator(tf.keras.Model):
+    """
+    Multi-scale approach: Multiple parallel paths with different receptive fields
+    Preserves spatial detail while allowing domain adaptation
+    """
+    def __init__(self, output_channels=2, n_subc=132, gen_l2=None, extract_layers=['d2', 'd3', 'd4']):
+        super().__init__()
+        self.extract_layers = extract_layers
+        kernel_regularizer = tf.keras.regularizers.l2(gen_l2) if gen_l2 is not None else None
+        
+        # ===== MAIN ENCODING PATH (for domain adaptation) =====
+        self.down1 = UNetBlock(32, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+        self.down2 = UNetBlock(64, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)  
+        self.down3 = UNetBlock(128, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+        self.down4 = UNetBlock(256, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        
+        # ===== PARALLEL DETAIL PRESERVATION PATH =====
+        # Shallow processing to preserve spatial details
+        self.detail_conv1 = tf.keras.layers.Conv2D(16, (3,3), padding='same', activation='relu', kernel_regularizer=kernel_regularizer)
+        self.detail_conv2 = tf.keras.layers.Conv2D(16, (3,3), padding='same', activation='relu', kernel_regularizer=kernel_regularizer)
+        self.detail_conv3 = tf.keras.layers.Conv2D(32, (4,3), strides=(2,1), padding='valid', activation='relu', kernel_regularizer=kernel_regularizer)
+        
+        # ===== DECODER WITH SKIP CONNECTIONS =====
+        # Use regular UNetUpBlock but with modified skip connections
+        self.up1 = UNetUpBlock(128, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        self.up2 = UNetUpBlock(64, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+        self.up3 = UNetUpBlock(64, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        
+        # ===== FUSION LAYER =====
+        self.fusion_conv = tf.keras.layers.Conv2D(64, (3,3), padding='same', activation='relu', kernel_regularizer=kernel_regularizer)
+        self.last = tf.keras.layers.Conv2DTranspose(output_channels, (4,3), strides=(2,1), 
+                                            padding='valid', activation='tanh', kernel_regularizer=kernel_regularizer)
+    
+    def call(self, x, training=False, return_features=False):  # 
+        # ===== MAIN ENCODING PATH =====
+        d1 = self.down1(x, training=training)
+        d2 = self.down2(d1, training=training) 
+        d3 = self.down3(d2, training=training)
+        d4 = self.down4(d3, training=training)  # ← Domain adaptation happens here
+        
+        # ===== DETAIL PRESERVATION PATH =====
+        detail = self.detail_conv1(x)
+        detail = self.detail_conv2(detail)
+        detail = reflect_padding_2d(detail, pad_h=0, pad_w=1)  
+        detail = self.detail_conv3(detail)  # (132, 14, 32) - preserves spatial resolution
+        
+        # ===== DECODER WITH REDUCED SKIP INFLUENCE =====
+        # Apply skip connection weighting BEFORE passing to UNetUpBlock
+        d3_weighted = d3 * 0.3  # Weak skip connection
+        d2_weighted = d2 * 0.2  # Weaker skip  
+        d1_weighted = d1 * 0.1  # Very weak skip
+        
+        u1 = self.up1(d4, d3_weighted, training=training) 
+        u2 = self.up2(u1, d2_weighted, training=training)  
+        u3 = self.up3(u2, d1_weighted, training=training)  
+        
+        # ===== FUSION =====
+        # Combine decoded features with detail path
+        fused = tf.concat([u3, detail], axis=-1)  # (132, 14, 64)
+        fused = self.fusion_conv(fused)
+        output = self.last(fused)
+        
+        if output.shape[2] > 14:
+            output = output[:, :, 1:15, :]
+        
+        
+        features = []
+        layer_map = {'d1': d1, 'd2': d2, 'd3': d3, 'd4': d4}
+        for layer_name in self.extract_layers:
+            if layer_name in layer_map:
+                features.append(tf.reshape(layer_map[layer_name], [tf.shape(layer_map[layer_name])[0], -1]))
+                
+        return output, features  
+    
+class AttentionPix2PixGenerator(tf.keras.Model):
+    """
+    Use attention to selectively choose between skip connection and adapted features
+    Compatible with existing GAN framework
+    """
+    def __init__(self, output_channels=2, n_subc=132, gen_l2=None, extract_layers=['d2', 'd3', 'd4']):
+        super().__init__()
+        self.extract_layers = extract_layers
+        kernel_regularizer = tf.keras.regularizers.l2(gen_l2) if gen_l2 is not None else None
+        
+        # Standard encoder (compatible with your existing framework)
+        self.down1 = UNetBlock(32, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+        self.down2 = UNetBlock(64, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        self.down3 = UNetBlock(128, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+        self.down4 = UNetBlock(256, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        
+        # Use regular UNetUpBlock with attention preprocessing
+        self.up1 = UNetUpBlock(128, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        self.up2 = UNetUpBlock(64, kernel_size=(4,3), strides=(2,1), gen_l2=gen_l2)
+        self.up3 = UNetUpBlock(32, kernel_size=(3,3), strides=(2,1), gen_l2=gen_l2)
+        
+        # Attention mechanisms for skip connections
+        self.attention1 = tf.keras.layers.Dense(1, activation='sigmoid')
+        self.attention2 = tf.keras.layers.Dense(1, activation='sigmoid')  
+        self.attention3 = tf.keras.layers.Dense(1, activation='sigmoid')
+        
+        self.last = tf.keras.layers.Conv2DTranspose(output_channels, (4,3), strides=(2,1), 
+                                                padding='valid', activation='tanh', kernel_regularizer=kernel_regularizer)
+        
+        # Store domain weight for use during training
+        self.current_domain_weight = 0.0
+    
+    def call(self, x, training=False, return_features=False, domain_weight=None):  
+        current_domain_weight = domain_weight if domain_weight is not None else self.current_domain_weight
+        
+        # Standard encoding  
+        d1 = self.down1(x, training=training)
+        d2 = self.down2(d1, training=training)
+        d3 = self.down3(d2, training=training) 
+        d4 = self.down4(d3, training=training)
+        
+        # ===== ATTENTION-WEIGHTED SKIP CONNECTIONS =====
+        # Attention for d3 skip connection
+        d3_pooled = tf.reduce_mean(d3, axis=[1,2], keepdims=True)  # Global average pooling
+        attention3 = self.attention1(d3_pooled)
+        attention3 = attention3 * (1.0 - current_domain_weight)  # Reduce during adaptation
+        d3_weighted = d3 * attention3
+        
+        # Attention for d2 skip connection  
+        d2_pooled = tf.reduce_mean(d2, axis=[1,2], keepdims=True)
+        attention2 = self.attention2(d2_pooled)
+        attention2 = attention2 * (1.0 - self.current_domain_weight)
+        d2_weighted = d2 * attention2
+        
+        # Attention for d1 skip connection
+        d1_pooled = tf.reduce_mean(d1, axis=[1,2], keepdims=True)
+        attention1 = self.attention3(d1_pooled)  
+        attention1 = attention1 * (1.0 - self.current_domain_weight)
+        d1_weighted = d1 * attention1
+        
+        # ===== STANDARD DECODER WITH ATTENTION-WEIGHTED SKIPS =====
+        u1 = self.up1(d4, d3_weighted, training=training)   
+        u2 = self.up2(u1, d2_weighted, training=training)  
+        u3 = self.up3(u2, d1_weighted, training=training)  
+        
+        output = self.last(u3)
+        if output.shape[2] > 14:
+            output = output[:, :, 1:15, :]
+            
+        # 
+        features = []
+        layer_map = {'d1': d1, 'd2': d2, 'd3': d3, 'd4': d4}
+        for layer_name in self.extract_layers:
+            if layer_name in layer_map:
+                features.append(tf.reshape(layer_map[layer_name], [tf.shape(layer_map[layer_name])[0], -1]))
+                
+        return output, features  
+
+class AttentionUNetUpBlock(tf.keras.layers.Layer):
+    def __init__(self, filters, kernel_size=(4,3), strides=(2,1), gen_l2=None):
+        super().__init__()
+        self.deconv = tf.keras.layers.Conv2DTranspose(filters, kernel_size, strides, padding='valid')
+        self.norm = InstanceNormalization()
+        
+        # Attention mechanism for skip connection
+        self.attention = tf.keras.layers.Dense(1, activation='sigmoid')  # Learn skip weight
+        
+    def call(self, x, skip, training, domain_weight=0.0):
+        x = self.deconv(x)
+        if x.shape[2] > 14:
+            x = x[:, :, 1:15, :]
+        x = self.norm(x, training=training)
+        x = tf.nn.relu(x)
+        
+        # Learn attention weights for skip connection
+        # Higher domain_weight → lower skip attention (more adaptation)
+        skip_attention = self.attention(tf.reduce_mean(skip, axis=[1,2], keepdims=True))
+        skip_attention = skip_attention * (1.0 - domain_weight)  # Reduce skip during adaptation
+        
+        # Apply attention to skip connection
+        weighted_skip = skip * skip_attention
+        
+        x = tf.concat([x, weighted_skip], axis=-1)
+        return x
