@@ -3193,35 +3193,62 @@ def filter_confident_predictions(predictions, inputs, targets, confidence_scores
     
     return filtered_predictions, filtered_inputs, filtered_targets, n_kept
 
-def self_training_step(model, source_loader, target_loader, loss_fn, optimizers, 
-                    confidence_threshold=0.8, quality_threshold=0.5, 
-                    weights=None, lower_range=-1, linear_interp=False):
+def train_step_wgan_gp_self_training(model, loader_H, loss_fn, optimizers, lower_range=-1, 
+                                save_features=False, nsymb=14, weights=None, linear_interp=False,
+                                confidence_threshold=0.8, quality_threshold=0.5,
+                                self_training_ratio=0.3):
     """
-    Single step of self-training: generate pseudo-labels and retrain
+    WGAN-GP training step with self-training approach
     """
-    loader_H_input_train_src, loader_H_true_train_src = source_loader
-    loader_H_input_train_tgt, _ = target_loader  # No target labels available
-    
-    loss_fn_est = loss_fn[0]
+    loader_H_input_train_src, loader_H_true_train_src, \
+        loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
+    loss_fn_est, loss_fn_bce = loss_fn[:2]
     gen_optimizer, disc_optimizer = optimizers[:2]
     
     adv_weight = weights.get('adv_weight', 0.01)
+    temporal_weight = weights.get('temporal_weight', 0.0)
+    frequency_weight = weights.get('frequency_weight', 0.0)
     est_weight = weights.get('est_weight', 1.0)
     
-    total_loss = 0.0
-    total_samples = 0
-    confident_samples = 0
+    epoc_loss_g = 0.0
+    epoc_loss_d = 0.0
+    epoc_loss_est = 0.0
+    epoc_loss_est_tgt = 0.0
+    epoc_confidence_score = 0.0
+    N_train = 0
+    N_confident_samples = 0
     
-    # Collect confident target pseudo-labels
-    target_inputs_confident = []
-    target_labels_confident = []
+    if save_features:
+        features_h5_path_source = 'features_source.h5'
+        if os.path.exists(features_h5_path_source):
+            os.remove(features_h5_path_source)
+        features_h5_source = h5py.File(features_h5_path_source, 'w')
+        features_dataset_source = None
+
+        features_h5_path_target = 'features_target.h5'
+        if os.path.exists(features_h5_path_target):
+            os.remove(features_h5_path_target)   
+        features_h5_target = h5py.File(features_h5_path_target, 'w')
+        features_dataset_target = None
     
+    # === Phase 1: Generate confident target pseudo-labels ===
     print("=== Generating pseudo-labels for target domain ===")
+    target_pseudo_data = []
     
-    # Generate pseudo-labels for target domain
-    for batch_idx in range(loader_H_input_train_tgt.total_batches):
-        x_tgt = loader_H_input_train_tgt.next_batch()
-        
+    # Calculate how many target batches to use for pseudo-label generation
+    max_target_batches = min(loader_H_input_train_tgt.total_batches, 
+                            int(loader_H_true_train_src.total_batches * self_training_ratio))
+    
+    # Reset target loader for Phase 1
+    loader_H_input_train_tgt.reset()
+    
+    for batch_idx in range(max_target_batches):
+        try:
+            x_tgt = loader_H_input_train_tgt.next_batch()
+        except StopIteration:
+            print(f"Target loader exhausted at batch {batch_idx}/{max_target_batches}")
+            break
+            
         # Preprocess target
         x_tgt_real = complx2real(x_tgt)
         x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
@@ -3230,42 +3257,42 @@ def self_training_step(model, source_loader, target_loader, loss_fn, optimizers,
         # Generate predictions with confidence estimation
         pred_tgt, confidence_scores = get_prediction_confidence(model, x_scaled_tgt, n_samples=5)
         
-        # Assess quality
+        # Assess quality using channel estimation physics
         quality_scores = assess_channel_quality(pred_tgt)
         
         # Filter confident predictions
-        filtered_preds, filtered_inputs, _, n_kept = filter_confident_predictions(
-            pred_tgt, x_scaled_tgt, None, confidence_scores, quality_scores,
-            confidence_threshold, quality_threshold
-        )
+        confident_mask = (confidence_scores > confidence_threshold) & (quality_scores > quality_threshold)
         
-        if filtered_preds is not None and n_kept > 0:
-            target_inputs_confident.append(filtered_inputs)
-            target_labels_confident.append(filtered_preds)
-            confident_samples += n_kept.numpy()
-        
-        total_samples += x_tgt.shape[0]
+        if tf.reduce_sum(tf.cast(confident_mask, tf.int32)) > 0:
+            # Keep only confident samples
+            filtered_preds = tf.boolean_mask(pred_tgt, confident_mask)
+            filtered_inputs = tf.boolean_mask(x_scaled_tgt, confident_mask)
+            
+            target_pseudo_data.append({
+                'inputs': filtered_inputs,
+                'labels': filtered_preds,
+                'confidence': tf.reduce_mean(tf.boolean_mask(confidence_scores, confident_mask))
+            })
+            
+            N_confident_samples += tf.reduce_sum(tf.cast(confident_mask, tf.int32)).numpy()
     
-    print(f"Confident target samples: {confident_samples}/{total_samples} ({100*confident_samples/total_samples:.1f}%)")
+    print(f"Generated {N_confident_samples} confident target pseudo-labels from {len(target_pseudo_data)} batches")
     
-    if confident_samples == 0:
-        print("No confident samples found - training on source only")
-        # Fall back to source-only training
-        return train_step_wgan_gp_source_only(model, (source_loader[0], source_loader[1], 
-                                                    target_loader[0], target_loader[0]), 
-                                            loss_fn, optimizers, lower_range, weights=weights)
+    # === Phase 2: Train with source + confident target data ===
+    print("=== Training with source + confident target data ===")
     
-    # Combine source and confident target data for retraining
-    print("=== Retraining with source + confident target data ===")
-    
-    epoch_loss = 0.0
-    n_train_batches = 0
+    # Reset all loaders for Phase 2
+    loader_H_input_train_src.reset()
+    loader_H_true_train_src.reset()
+    loader_H_input_train_tgt.reset()  # Reset again for monitoring
+    loader_H_true_train_tgt.reset()   # Reset for monitoring
     
     for batch_idx in range(loader_H_true_train_src.total_batches):
-        # Source data
+        # Get source data
         x_src = loader_H_input_train_src.next_batch()
         y_src = loader_H_true_train_src.next_batch()
-        
+        N_train += x_src.shape[0]
+
         # Preprocess source
         x_src_real = complx2real(x_src)
         y_src_real = complx2real(y_src)
@@ -3273,39 +3300,55 @@ def self_training_step(model, source_loader, target_loader, loss_fn, optimizers,
         y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
         x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
         y_scaled_src, _, _ = minmaxScaler(y_src_real, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
-        
-        # Add confident target data if available
-        if target_inputs_confident and batch_idx < len(target_inputs_confident):
-            # Combine source and target data
-            x_combined = tf.concat([x_scaled_src, target_inputs_confident[batch_idx]], axis=0)
-            y_combined = tf.concat([y_scaled_src, target_labels_confident[batch_idx]], axis=0)
+
+        # Combine with confident target data if available
+        if target_pseudo_data and batch_idx < len(target_pseudo_data):
+            target_batch = target_pseudo_data[batch_idx]
+            x_combined = tf.concat([x_scaled_src, target_batch['inputs']], axis=0)
+            y_combined = tf.concat([y_scaled_src, target_batch['labels']], axis=0)
+            batch_confidence = target_batch['confidence']
         else:
             x_combined = x_scaled_src
             y_combined = y_scaled_src
-        
-        # Standard GAN training on combined data
+            batch_confidence = 0.0
+
+        # === 1. Train Discriminator (WGAN-GP) ===
         with tf.GradientTape() as tape_d:
-            x_fake, _ = model.generator(x_combined, training=True)
+            x_fake_combined, _ = model.generator(x_combined, training=True)
             d_real = model.discriminator(y_combined, training=True)
-            d_fake = model.discriminator(x_fake, training=True)
+            d_fake = model.discriminator(x_fake_combined, training=True)
             
-            gp = gradient_penalty(model.discriminator, y_combined, x_fake, batch_size=tf.shape(x_combined)[0])
-            d_loss = tf.reduce_mean(d_fake) - tf.reduce_mean(d_real) + 10.0 * gp
+            gp = gradient_penalty(model.discriminator, y_combined, x_fake_combined, batch_size=tf.shape(x_combined)[0])
+            lambda_gp = 10.0
+
+            d_loss = tf.reduce_mean(d_fake) - tf.reduce_mean(d_real) + lambda_gp * gp
             
             if model.discriminator.losses:
                 d_loss += tf.add_n(model.discriminator.losses)
-        
+                
         grads_d = tape_d.gradient(d_loss, model.discriminator.trainable_variables)
         disc_optimizer.apply_gradients(zip(grads_d, model.discriminator.trainable_variables))
-        
+        epoc_loss_d += d_loss.numpy() * x_src.shape[0]
+
+        # === 2. Train Generator ===
         with tf.GradientTape() as tape_g:
-            x_fake, _ = model.generator(x_combined, training=True)
-            d_fake = model.discriminator(x_fake, training=False)
+            x_fake_combined, features_combined = model.generator(x_combined, training=True)
+            d_fake_combined = model.discriminator(x_fake_combined, training=False)
             
-            g_adv_loss = -tf.reduce_mean(d_fake)
-            g_est_loss = loss_fn_est(y_combined, x_fake)
+            # Generator losses
+            g_adv_loss = -tf.reduce_mean(d_fake_combined)
+            g_est_loss = loss_fn_est(y_combined, x_fake_combined)
             
-            g_loss = est_weight * g_est_loss + adv_weight * g_adv_loss
+            # Smoothness loss (optional)
+            if temporal_weight != 0 or frequency_weight != 0:
+                smoothness_loss = compute_total_smoothness_loss(x_fake_combined, 
+                                                              temporal_weight=temporal_weight, 
+                                                              frequency_weight=frequency_weight)
+            else:
+                smoothness_loss = 0.0
+        
+            # Total generator loss
+            g_loss = est_weight * g_est_loss + adv_weight * g_adv_loss + smoothness_loss
             
             if model.generator.losses:
                 g_loss += tf.add_n(model.generator.losses)
@@ -3313,115 +3356,295 @@ def self_training_step(model, source_loader, target_loader, loss_fn, optimizers,
         grads_g = tape_g.gradient(g_loss, model.generator.trainable_variables)
         gen_optimizer.apply_gradients(zip(grads_g, model.generator.trainable_variables))
         
-        epoch_loss += g_loss.numpy()
-        n_train_batches += 1
+        epoc_loss_g += g_loss.numpy() * x_src.shape[0]
+        epoc_loss_est += g_est_loss.numpy() * x_src.shape[0]
+        epoc_confidence_score += batch_confidence * x_src.shape[0]
+
+        # === 3. Monitor target performance separately (FIXED) ===
+        # Only monitor if target batches are still available
+        if batch_idx < loader_H_true_train_tgt.total_batches:
+            try:
+                x_tgt = loader_H_input_train_tgt.next_batch()
+                y_tgt = loader_H_true_train_tgt.next_batch()
+                
+                x_tgt_real = complx2real(x_tgt)
+                y_tgt_real = complx2real(y_tgt)
+                x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
+                y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
+                x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+                y_scaled_tgt, _, _ = minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+                
+                x_fake_tgt, features_tgt = model.generator(x_scaled_tgt, training=False)
+                g_est_loss_tgt = loss_fn_est(y_scaled_tgt, x_fake_tgt)
+                epoc_loss_est_tgt += g_est_loss_tgt.numpy() * x_tgt.shape[0]
+                
+            except StopIteration:
+                # Target loader exhausted - skip monitoring for remaining batches
+                pass
+
+        
+    # Average losses
+    avg_loss_g = epoc_loss_g / N_train
+    avg_loss_d = epoc_loss_d / N_train
+    avg_loss_est = epoc_loss_est / N_train
+    avg_loss_est_tgt = epoc_loss_est_tgt / N_train if epoc_loss_est_tgt > 0 else 0.0
+    avg_confidence_score = epoc_confidence_score / N_train
     
-    avg_loss = epoch_loss / n_train_batches if n_train_batches > 0 else 0
-    
+    # Return compatible output structure
     return train_step_Output(
-        avg_epoc_loss_est=avg_loss,
-        avg_epoc_loss_domain=0.0,  # No domain loss in self-training
-        avg_epoc_loss=avg_loss,
-        avg_epoc_loss_est_target=0.0,
+        avg_epoc_loss_est=avg_loss_est,
+        avg_epoc_loss_domain=avg_confidence_score,  # Use confidence as domain metric
+        avg_epoc_loss=avg_loss_g,
+        avg_epoc_loss_est_target=avg_loss_est_tgt,
         features_source=None,
         film_features_source=None,
-        avg_epoc_loss_d=0.0
+        avg_epoc_loss_d=avg_loss_d
     )
+    
+def val_step_wgan_gp_self_training(model, loader_H, loss_fn, lower_range, nsymb=14, weights=None, 
+                                linear_interp=False, return_H_gen=False, 
+                                confidence_threshold=0.7, quality_threshold=0.4):
+    """
+    Validation step for self-training approach - similar to val_step_wgan_gp_jmmd
+    
+    Args:
+        model: GAN model instance with generator and discriminator
+        loader_H: tuple of (input_src, true_src, input_tgt, true_tgt) DataLoaders
+        loss_fn: tuple of (estimation loss, binary cross-entropy loss)
+        lower_range: lower range for min-max scaling
+        nsymb: number of symbols
+        weights: weight dictionary
+        confidence_threshold: threshold for confident predictions during validation
+        quality_threshold: threshold for quality assessment during validation
+        
+    Returns:
+        H_sample, epoc_eval_return (same structure as val_step_wgan_gp_jmmd)
+    """
+    
+    adv_weight = weights.get('adv_weight', 0.01)
+    temporal_weight = weights.get('temporal_weight', 0.0)
+    frequency_weight = weights.get('frequency_weight', 0.0)
+    est_weight = weights.get('est_weight', 1.0)
+    
+    loader_H_input_val_source, loader_H_true_val_source, loader_H_input_val_target, loader_H_true_val_target = loader_H
+    loss_fn_est, loss_fn_bce = loss_fn[:2]
+    
+    N_val_source = 0
+    N_val_target = 0
+    epoc_loss_est_source = 0.0
+    epoc_loss_est_target = 0.0
+    epoc_nmse_val_source = 0.0
+    epoc_nmse_val_target = 0.0
+    epoc_gan_disc_loss = 0.0
+    epoc_confidence_score = 0.0  # Track average confidence instead of JMMD
+    epoc_quality_score = 0.0     # Track average quality score
+    epoc_smoothness_loss = 0.0
+    confident_target_samples = 0  # Count confident target predictions
+    H_sample = []
+    
+    if return_H_gen:
+        all_H_gen_src = []
+        all_H_gen_tgt = []
 
-def self_training_loop(model, source_loader, target_loader, loss_fn, optimizers, 
-                    n_iterations=5, weights=None, lower_range=-1, linear_interp=False):
-    """
-    Complete self-training loop
-    """
-    # Progressive threshold relaxation
-    confidence_thresholds = [0.9, 0.8, 0.7, 0.6, 0.5]  # Start strict, relax gradually
-    quality_thresholds = [0.8, 0.6, 0.4, 0.3, 0.2]
-    
-    results = []
-    
-    for iteration in range(n_iterations):
-        print(f"\n{'='*50}")
-        print(f"SELF-TRAINING ITERATION {iteration+1}/{n_iterations}")
-        print(f"{'='*50}")
-        
-        conf_thresh = confidence_thresholds[min(iteration, len(confidence_thresholds)-1)]
-        qual_thresh = quality_thresholds[min(iteration, len(quality_thresholds)-1)]
-        
-        print(f"Confidence threshold: {conf_thresh}")
-        print(f"Quality threshold: {qual_thresh}")
-        
-        # Single self-training step
-        step_result = self_training_step(
-            model, source_loader, target_loader, loss_fn, optimizers,
-            confidence_threshold=conf_thresh, 
-            quality_threshold=qual_thresh,
-            weights=weights, lower_range=lower_range, linear_interp=linear_interp
-        )
-        
-        results.append(step_result)
-        
-        print(f"Iteration {iteration+1} completed. Loss: {step_result.avg_epoc_loss:.6f}")
-    
-    return results
+    for idx in range(loader_H_true_val_source.total_batches):
+        # --- Source domain ---
+        x_src = loader_H_input_val_source.next_batch()
+        y_src = loader_H_true_val_source.next_batch()
+        # --- Target domain ---
+        x_tgt = loader_H_input_val_target.next_batch()
+        y_tgt = loader_H_true_val_target.next_batch()
+        N_val_source += x_src.shape[0]
+        N_val_target += x_tgt.shape[0]
 
-def train_with_self_training(model, loaders, loss_fn, optimizers, weights, 
-                        n_epochs=200, self_training_start_epoch=50, self_training_interval=25):
-    """
-    Training with periodic self-training
-    """
-    loader_H_input_train_src, loader_H_true_train_src, \
-    loader_H_input_train_tgt, loader_H_true_train_tgt = loaders
-    
-    source_loader = (loader_H_input_train_src, loader_H_true_train_src)
-    target_loader = (loader_H_input_train_tgt, loader_H_true_train_tgt)
-    
-    metrics = {
-        'train_loss': [], 'train_est_loss': [], 'val_loss': [],
-        'val_est_loss_source': [], 'val_est_loss_target': [],
-        'nmse_val_source': [], 'nmse_val_target': []
-    }
-    
-    for epoch in range(n_epochs):
-        print(f"\n{'='*60}")
-        print(f"EPOCH {epoch+1}/{n_epochs}")
-        print(f"{'='*60}")
+        # Preprocess (source)
+        x_src_real = complx2real(x_src)
+        y_src_real = complx2real(y_src)
+        x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
+        y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = minmaxScaler(y_src_real, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+
+        # Preprocess (target)
+        x_tgt_real = complx2real(x_tgt)
+        y_tgt_real = complx2real(y_tgt)
+        x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
+        y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
+        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_tgt, _, _ = minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+
+        # === Source domain prediction ===
+        preds_src, features_src = model.generator(x_scaled_src, training=False, return_features=True)
+        preds_src = preds_src.numpy() if hasattr(preds_src, 'numpy') else preds_src
+        preds_src_descaled = deMinMax(preds_src, x_min_src, x_max_src, lower_range=lower_range)
+        batch_est_loss_source = loss_fn_est(y_scaled_src, preds_src).numpy()
+        epoc_loss_est_source += batch_est_loss_source * x_src.shape[0]
+        mse_val_source = np.mean((preds_src_descaled - y_src_real) ** 2, axis=(1, 2, 3))
+        power_source = np.mean(y_src_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_source += np.mean(mse_val_source / (power_source + 1e-30)) * x_src.shape[0]
+
+        # === Target domain prediction with confidence assessment ===
+        # Generate predictions with confidence estimation for target
+        preds_tgt_confident, confidence_scores = get_prediction_confidence(model, x_scaled_tgt, n_samples=3)
         
-        # Regular training
-        if epoch < self_training_start_epoch or (epoch - self_training_start_epoch) % self_training_interval != 0:
-            # Source-only training
-            train_result = train_step_wgan_gp_source_only(
-                model, loaders, loss_fn, optimizers, weights=weights
-            )
-            print(f"Source-only training - Loss: {train_result.avg_epoc_loss:.6f}")
+        # Use deterministic prediction for main evaluation
+        preds_tgt, features_tgt = model.generator(x_scaled_tgt, training=False, return_features=True)
+        preds_tgt = preds_tgt.numpy() if hasattr(preds_tgt, 'numpy') else preds_tgt
+        preds_tgt_descaled = deMinMax(preds_tgt, x_min_tgt, x_max_tgt, lower_range=lower_range)
+        batch_est_loss_target = loss_fn_est(y_scaled_tgt, preds_tgt).numpy()
+        epoc_loss_est_target += batch_est_loss_target * x_tgt.shape[0]
+        mse_val_target = np.mean((preds_tgt_descaled - y_tgt_real) ** 2, axis=(1, 2, 3))
+        power_target = np.mean(y_tgt_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_target += np.mean(mse_val_target / (power_target + 1e-30)) * x_tgt.shape[0]
+
+        # === Self-training specific metrics ===
+        # Assess quality of target predictions
+        quality_scores = assess_channel_quality(preds_tgt_confident)
         
-        else:
-            # Self-training
-            print("🔄 APPLYING SELF-TRAINING")
-            self_training_results = self_training_loop(
-                model, source_loader, target_loader, loss_fn, optimizers,
-                n_iterations=2,  # Short iterations during training
-                weights=weights
-            )
-            train_result = self_training_results[-1]  # Use last iteration result
-            print(f"Self-training completed - Loss: {train_result.avg_epoc_loss:.6f}")
+        # Track confidence and quality scores
+        avg_confidence_batch = tf.reduce_mean(confidence_scores)
+        avg_quality_batch = quality_scores  # Already a scalar
+        epoc_confidence_score += avg_confidence_batch.numpy() * x_tgt.shape[0]
+        epoc_quality_score += avg_quality_batch.numpy() * x_tgt.shape[0]
         
-        # Record metrics
-        metrics['train_loss'].append(train_result.avg_epoc_loss)
-        metrics['train_est_loss'].append(train_result.avg_epoc_loss_est)
+        # Count confident predictions (for monitoring self-training effectiveness)
+        confident_mask = (confidence_scores > confidence_threshold) & (quality_scores > quality_threshold)
+        confident_target_samples += tf.reduce_sum(tf.cast(confident_mask, tf.int32)).numpy()
+
+        # === WGAN Discriminator Scores (for monitoring only) ===
+        # Only considering source domain (same as JMMD version)
+        d_real_src = model.discriminator(y_scaled_src, training=False)
+        d_fake_src = model.discriminator(preds_src, training=False)
+        gp_src = gradient_penalty(model.discriminator, y_scaled_src, preds_src, batch_size=x_scaled_src.shape[0])
+        lambda_gp = 10.0
         
-        # Validation every 10 epochs
-        if (epoch + 1) % 10 == 0:
-            val_result = val_step_wgan_gp_source_only(model, loaders, loss_fn, weights=weights)
-            metrics['val_loss'].append(val_result[1]['avg_total_loss'])
-            metrics['val_est_loss_source'].append(val_result[1]['avg_loss_est_source'])
-            metrics['val_est_loss_target'].append(val_result[1]['avg_loss_est_target'])
-            metrics['nmse_val_source'].append(val_result[1]['avg_nmse_source'])
-            metrics['nmse_val_target'].append(val_result[1]['avg_nmse_target'])
+        # WGAN critic loss: mean(fake) - mean(real)
+        d_loss_src = tf.reduce_mean(d_fake_src) - tf.reduce_mean(d_real_src) + lambda_gp * gp_src
+        
+        # only observe GAN disc loss on source dataset
+        epoc_gan_disc_loss += d_loss_src.numpy() * x_src.shape[0]
+
+        # === ADD SMOOTHNESS LOSS COMPUTATION ===
+        if temporal_weight != 0 or frequency_weight != 0:
+            # Convert back to tensors if needed for smoothness computation
+            preds_src_tensor = tf.convert_to_tensor(preds_src) if not tf.is_tensor(preds_src) else preds_src
+            preds_tgt_tensor = tf.convert_to_tensor(preds_tgt) if not tf.is_tensor(preds_tgt) else preds_tgt
             
-            print(f"Validation - Source NMSE: {val_result[1]['avg_nmse_source']:.6f}, "
-                f"Target NMSE: {val_result[1]['avg_nmse_target']:.6f}")
+            smoothness_loss_src = compute_total_smoothness_loss(
+                preds_src_tensor, temporal_weight=temporal_weight, frequency_weight=frequency_weight
+            )
+            smoothness_loss_tgt = compute_total_smoothness_loss(
+                preds_tgt_tensor, temporal_weight=temporal_weight, frequency_weight=frequency_weight
+            )
+            batch_smoothness_loss = (smoothness_loss_src + smoothness_loss_tgt) / 2
+            epoc_smoothness_loss += batch_smoothness_loss.numpy() * x_src.shape[0]
+
+        # === Save H samples for visualization at first batch ===
+        if idx == 0:
+            n_samples = min(3, x_src_real.shape[0], x_tgt_real.shape[0])
+            # Source
+            H_true_sample = y_src_real[:n_samples].copy()
+            H_input_sample = x_src_real[:n_samples].copy()
+            #
+            if hasattr(preds_src_descaled, 'numpy'):
+                H_est_sample = preds_src_descaled[:n_samples].numpy().copy()
+            else:
+                H_est_sample = preds_src_descaled[:n_samples].copy()
+            #
+            mse_sample_source = np.mean((H_est_sample - H_true_sample) ** 2, axis=(1, 2, 3))
+            power_sample_source = np.mean(H_true_sample ** 2, axis=(1, 2, 3))
+            nmse_est_source = mse_sample_source / (power_sample_source + 1e-30)
+            mse_input_source = np.mean((H_input_sample - H_true_sample) ** 2, axis=(1, 2, 3))
+            nmse_input_source = mse_input_source / (power_sample_source + 1e-30)
+            # Target
+            H_true_sample_target = y_tgt_real[:n_samples].copy()
+            H_input_sample_target = x_tgt_real[:n_samples].copy()
+            #
+            if hasattr(preds_tgt_descaled, 'numpy'):
+                H_est_sample_target = preds_tgt_descaled[:n_samples].numpy().copy()
+            else:
+                H_est_sample_target = preds_tgt_descaled[:n_samples].copy()
+            #
+            mse_sample_target = np.mean((H_est_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            power_sample_target = np.mean(H_true_sample_target ** 2, axis=(1, 2, 3))
+            nmse_est_target = mse_sample_target / (power_sample_target + 1e-30)
+            mse_input_target = np.mean((H_input_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            nmse_input_target = mse_input_target / (power_sample_target + 1e-30)
+            H_sample = [H_true_sample, H_input_sample, H_est_sample, nmse_input_source, nmse_est_source,
+                        H_true_sample_target, H_input_sample_target, H_est_sample_target, nmse_input_target, nmse_est_target]
+        
+        if return_H_gen:
+            # Convert to numpy if needed and append to lists
+            H_gen_src_batch = preds_src_descaled.numpy().copy() if hasattr(preds_src_descaled, 'numpy') else preds_src_descaled.copy()
+            H_gen_tgt_batch = preds_tgt_descaled.numpy().copy() if hasattr(preds_tgt_descaled, 'numpy') else preds_tgt_descaled.copy()
+            
+            all_H_gen_src.append(H_gen_src_batch)
+            all_H_gen_tgt.append(H_gen_tgt_batch)
     
-    return model, metrics
+    if return_H_gen:
+        # Concatenate all batches along the batch dimension (axis=0)
+        H_gen_src_all = np.concatenate(all_H_gen_src, axis=0)
+        H_gen_tgt_all = np.concatenate(all_H_gen_tgt, axis=0)
+        H_gen = {
+            'H_gen_src': H_gen_src_all,
+            'H_gen_tgt': H_gen_tgt_all
+        }
+
+    # Calculate averages
+    N_val = N_val_source + N_val_target
+    avg_loss_est_source = epoc_loss_est_source / N_val_source
+    avg_loss_est_target = epoc_loss_est_target / N_val_target
+    avg_loss_est = (avg_loss_est_source + avg_loss_est_target) / 2
+    avg_nmse_source = epoc_nmse_val_source / N_val_source
+    avg_nmse_target = epoc_nmse_val_target / N_val_target
+    avg_nmse = (avg_nmse_source + avg_nmse_target) / 2
+    # only observe GAN disc loss on source dataset
+    avg_gan_disc_loss = epoc_gan_disc_loss / N_val_source 
+    
+    # Self-training specific metrics (replace JMMD)
+    avg_confidence_score = epoc_confidence_score / N_val_target
+    avg_quality_score = epoc_quality_score / N_val_target
+    confident_ratio = confident_target_samples / N_val_target  # Percentage of confident predictions
+    
+    # Use confidence score as "domain loss" replacement for compatibility
+    avg_jmmd_loss = avg_confidence_score  # Higher confidence = better "domain alignment"
+    
+    # smoothness loss average
+    avg_smoothness_loss = epoc_smoothness_loss / N_val_source if epoc_smoothness_loss > 0 else 0.0
+    
+    # For compatibility with existing code, we'll set domain accuracy based on confidence
+    # High confidence = good domain adaptation
+    avg_domain_acc_source = 1.0  # Source is always "confident"
+    avg_domain_acc_target = confident_ratio  # Target confidence ratio as "accuracy"
+    avg_domain_acc = (avg_domain_acc_source + avg_domain_acc_target) / 2
+
+    # Weighted total loss (for comparison with training) - use confidence as domain metric
+    avg_total_loss = est_weight * avg_loss_est + adv_weight * avg_gan_disc_loss \
+                    + avg_confidence_score + avg_smoothness_loss  # Confidence as "domain" component
+
+    # Compose epoc_eval_return - Same structure as val_step_wgan_gp_jmmd
+    epoc_eval_return = {
+        'avg_total_loss': avg_total_loss,
+        'avg_loss_est_source': avg_loss_est_source,
+        'avg_loss_est_target': avg_loss_est_target, 
+        'avg_loss_est': avg_loss_est,
+        'avg_gan_disc_loss': avg_gan_disc_loss,
+        'avg_jmmd_loss': avg_jmmd_loss,  # Use confidence score as JMMD replacement
+        'avg_nmse_source': avg_nmse_source,
+        'avg_nmse_target': avg_nmse_target,
+        'avg_nmse': avg_nmse,
+        'avg_domain_acc_source': avg_domain_acc_source,
+        'avg_domain_acc_target': avg_domain_acc_target,
+        'avg_domain_acc': avg_domain_acc,
+        'avg_smoothness_loss': avg_smoothness_loss,
+        # Additional self-training specific metrics
+        'avg_confidence_score': avg_confidence_score,
+        'avg_quality_score': avg_quality_score,
+        'confident_target_ratio': confident_ratio
+    }
+
+    if return_H_gen:
+        return H_sample, epoc_eval_return, H_gen
+    return H_sample, epoc_eval_return
 
 
 # CNN 

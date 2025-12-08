@@ -166,6 +166,7 @@ epoch_step = 1
 
 sub_folder_ = ['GAN_practical']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
 
+
 for sub_folder in sub_folder_:
     print(f"Processing: {sub_folder}")
     pad_metrics = {
@@ -287,17 +288,17 @@ for sub_folder in sub_folder_:
         loss_fn = [loss_fn_ce, loss_fn_bce]
     
         ##########################
-        # if epoch==0 or epoch == n_epochs-1:
-        #     # return_features == return features to calculate PAD
-        #     return_features = True
-        #     epoc_pad.append(epoch)
-        # else:
-        #     return_features = False
+        if epoch in [int(n_epochs * r) for r in [0, 0.25, 0.5, 0.75]] or epoch == n_epochs-1:
+            # return_features == return features to calculate PAD
+            return_features = True
+            epoc_pad.append(epoch)
+        else:
+            return_features = False
 
         ##########################
         # 
-        train_step_output = train_step_wgan_gp_self_training(model, loader_H, loss_fn, optimizer, lower_range=-1, 
-                        weights=weights, linear_interp=linear_interp)
+        train_step_output = train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizer, lower_range=-1, 
+                        save_features=True, weights=weights, linear_interp=linear_interp)
 
         train_epoc_loss_est        = train_step_output.avg_epoc_loss_est
         train_epoc_loss_d          = train_step_output.avg_epoc_loss_d
@@ -311,37 +312,37 @@ for sub_folder in sub_folder_:
                 # All are already calculated in average over training dataset (source/target - respectively)
         print("Time", time.perf_counter() - start, "seconds")
         # Calculate PAD for the extracted features
-        # if return_features and (weights['domain_weight']!=0):
-        #     features_source_file = "features_source.h5"
-        #     features_target_file = "features_target.h5"
-        #     print(f"epoch {epoch+1}/{n_epochs}")
-        #     ## Calculate PCA_PAD for extracted features with PCA_SVM, PCA_LDA, PCA_LogReg
-        #     X_features, y_features = PAD.extract_features_with_pca(features_source_file, features_target_file, pca_components=100)
-        #     pad_svm_epoc = PAD.calc_pad_svm(X_features, y_features)
-        #     pad_lda_epoc = PAD.calc_pad_lda(X_features, y_features)
-        #     pad_logreg_epoc = PAD.calc_pad_logreg(X_features, y_features)
-        #     pad_metrics['pad_pca_svm'][f'epoch_{epoch+1}'] = pad_svm_epoc
-        #     pad_metrics['pad_pca_lda'][f'epoch_{epoch+1}'] = pad_lda_epoc
-        #     pad_metrics['pad_pca_logreg'][f'epoch_{epoch+1}'] = pad_logreg_epoc
+        if return_features and (weights['domain_weight']!=0) and (epoch==0 or epoch == n_epochs-1):
+            features_source_file = "features_source.h5"
+            features_target_file = "features_target.h5"
+            print(f"epoch {epoch+1}/{n_epochs}")
+            ## Calculate PCA_PAD for extracted features with PCA_SVM, PCA_LDA, PCA_LogReg
+            X_features, y_features = PAD.extract_features_with_pca(features_source_file, features_target_file, pca_components=100)
+            pad_svm_epoc = PAD.calc_pad_svm(X_features, y_features)
+            pad_lda_epoc = PAD.calc_pad_lda(X_features, y_features)
+            pad_logreg_epoc = PAD.calc_pad_logreg(X_features, y_features)
+            pad_metrics['pad_pca_svm'][f'epoch_{epoch+1}'] = pad_svm_epoc
+            pad_metrics['pad_pca_lda'][f'epoch_{epoch+1}'] = pad_lda_epoc
+            pad_metrics['pad_pca_logreg'][f'epoch_{epoch+1}'] = pad_logreg_epoc
             
-        #     ## Distribution of extracted features
-        #     plotfig.plotHist(features_source_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'source_epoch_{epoch+1}', percent=99)
-        #     plotfig.plotHist(features_target_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'target_epoch_{epoch+1}', percent=99)
-        #     #
-        #     plotfig.plotHist(features_source_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'source_epoch_{epoch+1}', percent=100)
-        #     plotfig.plotHist(features_target_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'target_epoch_{epoch+1}', percent=100)
-        #     #
-        #     # Calculate Wasserstein-1 distance for extracted features
-        #     # print("Calculating Wasserstein-1 distance for extracted features ...")
-        #     # w_dist_epoc = plotfig.wasserstein_approximate(features_source_file, features_target_file)
-        #     # w_dist.append(w_dist_epoc)
+            ## Distribution of extracted features
+            plotfig.plotHist(features_source_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'source_epoch_{epoch+1}', percent=99)
+            plotfig.plotHist(features_target_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'target_epoch_{epoch+1}', percent=99)
+            #
+            plotfig.plotHist(features_source_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'source_epoch_{epoch+1}', percent=100)
+            plotfig.plotHist(features_target_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'target_epoch_{epoch+1}', percent=100)
+            #
+            # Calculate Wasserstein-1 distance for extracted features
+            # print("Calculating Wasserstein-1 distance for extracted features ...")
+            # w_dist_epoc = plotfig.wasserstein_approximate(features_source_file, features_target_file)
+            # w_dist.append(w_dist_epoc)
             
 
-        #     if os.path.exists(features_source_file):
-        #         os.remove(features_source_file)
-        #     if os.path.exists(features_target_file):
-        #         os.remove(features_target_file)
-        #     print("Time", time.perf_counter() - start, "seconds")
+            if os.path.exists(features_source_file):
+                os.remove(features_source_file)
+            if os.path.exists(features_target_file):
+                os.remove(features_target_file)
+            print("Time", time.perf_counter() - start, "seconds")
             
         
         # Average loss for the epoch
@@ -374,16 +375,16 @@ for sub_folder in sub_folder_:
         # eval_func = utils_UDA_FiLM.val_step
         if (epoch==epoch_min) or (epoch+1>epoch_min and (epoch-epoch_min)%epoch_step==0) and epoch!=n_epochs-1:
             # 
-            H_sample, epoc_val_return = val_step_wgan_gp_self_training(model, loader_H_eval, loss_fn, lower_range, 
+            H_sample, epoc_val_return = val_step_wgan_gp_jmmd_normalized(model, loader_H_eval, loss_fn, lower_range, 
                                             weights=weights, linear_interp=linear_interp)
             visualize_H(H_sample, H_to_save, epoch, plotfig.figChan, flag, model_path, sub_folder, domain_weight=weights['domain_weight'])
             flag = 0  # after the first epoch, no need to save H_true anymore
         elif epoch==n_epochs-1:
-            _, epoc_val_return, H_val_gen = val_step_wgan_gp_self_training(model, loader_H_eval, loss_fn, lower_range, 
+            _, epoc_val_return, H_val_gen = val_step_wgan_gp_jmmd_normalized(model, loader_H_eval, loss_fn, lower_range, 
                                             weights=weights, linear_interp=linear_interp, return_H_gen=True)    
         else:
             # 
-            _, epoc_val_return = val_step_wgan_gp_self_training(model, loader_H_eval, loss_fn, lower_range, 
+            _, epoc_val_return = val_step_wgan_gp_jmmd_normalized(model, loader_H_eval, loss_fn, lower_range, 
                                         weights=weights, linear_interp=linear_interp)
         
         post_val(epoc_val_return, epoch, n_epochs, val_metrics, domain_weight=weights['domain_weight'])
@@ -393,9 +394,9 @@ for sub_folder in sub_folder_:
             all_metrics = {
                 'figLoss': plotfig.figLoss, 
                 'savemat': savemat,
-                # 'pad_metrics': pad_metrics,
-                # 'epoc_pad': epoc_pad,
-                # 'pad_svm': pad_svm, 
+                'pad_metrics': pad_metrics, 
+                'epoc_pad': epoc_pad,
+                'pad_svm': pad_svm, 
                 'weights': weights, 
                 'optimizer': optimizer
             }
