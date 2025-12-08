@@ -816,15 +816,7 @@ def train_step_wgan_gp_jmmd_new(model, loader_H, loss_fn, optimizers, lower_rang
                             save_features = False, nsymb=14, weights=None, linear_interp=False,
                             pca_components=2000):
     """
-    Modified WGAN-GP training step using JMMD instead of domain discriminator
-    
-    Args:
-        model: GAN model instance with generator and discriminator
-        loader_H: tuple of (loader_H_input_train_src, loader_H_true_train_src, 
-                        loader_H_input_train_tgt, loader_H_true_train_tgt)
-        loss_fn: tuple of loss functions (estimation_loss, bce_loss) - no domain loss needed
-        optimizers: tuple of (gen_optimizer, disc_optimizer) - no domain optimizer needed
-        domain_weight: weight for JMMD loss (replaces domain_weight)
+    To PCA fit and save features for PAD calculation
     """
     loader_H_input_train_src, loader_H_true_train_src, \
         loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
@@ -3653,14 +3645,14 @@ class CNNGenerator(tf.keras.Model):
     CNN using your existing SameShapeBlock
     """
     def __init__(self, output_channels=2, n_subc=132, gen_l2=None, 
-                n_blocks=12, base_filters=32, extract_layers=['block_5', 'block_6']):
+                n_blocks=8, base_filters=32, extract_layers=['block_3', 'block_4']):
         super().__init__()
         self.n_blocks = n_blocks
         self.extract_layers = extract_layers
         
         # Input adaptation: 2 channels -> base_filters channels
         self.input_conv = tf.keras.layers.Conv2D(
-            base_filters, (3, 3), padding='same', activation='relu',
+            base_filters, (3, 3), padding='valid', activation='relu',
             kernel_regularizer=tf.keras.regularizers.l2(gen_l2) if gen_l2 else None
         )
         
@@ -3683,12 +3675,13 @@ class CNNGenerator(tf.keras.Model):
         
         # Output adaptation: final_filters -> output_channels
         self.output_conv = tf.keras.layers.Conv2D(
-            output_channels, (3, 3), padding='same', activation='tanh',
+            output_channels, (3, 3), padding='valid', activation='tanh',
             kernel_regularizer=tf.keras.regularizers.l2(gen_l2) if gen_l2 else None
         )
     
     def call(self, x, training=False, return_features=False):
         # Input adaptation: (132, 14, 2) -> (132, 14, base_filters)
+        x = reflect_padding_2d(x, pad_h=1, pad_w=1)  # Reflect padding
         out = self.input_conv(x)
         
         # Store intermediate features for extraction
@@ -3700,6 +3693,7 @@ class CNNGenerator(tf.keras.Model):
             block_outputs[f'block_{i+1}'] = out
         
         # Output adaptation: (132, 14, final_filters) -> (132, 14, 2)
+        out = reflect_padding_2d(out, pad_h=1, pad_w=1)  # Reflect padding
         output = self.output_conv(out)
         
         # Feature extraction for domain adaptation
@@ -3710,3 +3704,6 @@ class CNNGenerator(tf.keras.Model):
                 features.append(tf.reshape(feature_tensor, [tf.shape(feature_tensor)[0], -1]))
         
         return output, features
+    
+    
+# Residual Approach
