@@ -3645,7 +3645,7 @@ class CNNGenerator(tf.keras.Model):
     CNN using your existing SameShapeBlock
     """
     def __init__(self, output_channels=2, n_subc=132, gen_l2=None, 
-                n_blocks=8, base_filters=32, extract_layers=['block_3', 'block_4']):
+                n_blocks=6, base_filters=32, extract_layers=['block_2', 'block_3']):
         super().__init__()
         self.n_blocks = n_blocks
         self.extract_layers = extract_layers
@@ -3656,20 +3656,19 @@ class CNNGenerator(tf.keras.Model):
             kernel_regularizer=tf.keras.regularizers.l2(gen_l2) if gen_l2 else None
         )
         
-        # Use your existing SameShapeBlock with progressive channel expansion
+        # Use existing SameShapeBlock with progressive channel expansion
         self.blocks = []
         for i in range(n_blocks):
-            # Progressive channel increase strategy
-            if i < 3:
-                filters = base_filters                    # Early blocks: 32 filters
-            elif i < 6:
-                filters = base_filters * 2               # Mid-early: 64 filters  
-            elif i < 9:
-                filters = base_filters * 4               # Mid-late: 128 filters
+            # Pyramid channel progression strategy
+            if i < n_blocks // 2:
+                # First half: exponential increase
+                filters = min(base_filters * (2 ** i), 1024)
             else:
-                filters = base_filters * 6               # Late blocks: 192 filters
+                # Second half: exponential decrease (mirror of first half)
+                mirror_index = n_blocks - i - 1
+                filters = min(base_filters * (2 ** mirror_index), 1024)
             
-            # Use your existing SameShapeBlock
+            # Use existing SameShapeBlock
             block = SameShapeBlock(filters=filters, gen_l2=gen_l2)
             self.blocks.append(block)
         
