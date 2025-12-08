@@ -3112,3 +3112,378 @@ class AttentionUNetUpBlock(tf.keras.layers.Layer):
         
         x = tf.concat([x, weighted_skip], axis=-1)
         return x
+    
+    
+### Self training
+def assess_channel_quality(H_estimated, quality_thresholds=None):
+    """
+    Assess quality based on channel estimation physics
+    No ground truth needed - just reasonable channel properties
+    """
+    if quality_thresholds is None:
+        quality_thresholds = {
+            'freq_smoothness_weight': 1.0,
+            'temporal_smoothness_weight': 0.5,
+            'energy_weight': 0.3,
+            'range_weight': 2.0
+        }
+    
+    # 1. Frequency smoothness (channels should be smooth across subcarriers)
+    freq_diff = tf.abs(H_estimated[:, 1:, :, :] - H_estimated[:, :-1, :, :])
+    freq_smoothness = -tf.reduce_mean(freq_diff) * quality_thresholds['freq_smoothness_weight']
+    
+    # 2. Temporal smoothness (adjacent symbols should be correlated) 
+    temporal_diff = tf.abs(H_estimated[:, :, 1:, :] - H_estimated[:, :, :-1, :])
+    temporal_smoothness = -tf.reduce_mean(temporal_diff) * quality_thresholds['temporal_smoothness_weight']
+    
+    # 3. Energy consistency (reasonable amplitude range)
+    energy = tf.reduce_mean(tf.square(H_estimated))
+    energy_penalty = -tf.abs(energy - 0.5) * quality_thresholds['energy_weight']  # Target energy ~0.5
+    
+    # 4. Amplitude range check (for complex channels)
+    amplitude = tf.sqrt(tf.square(H_estimated[:,:,:,0]) + tf.square(H_estimated[:,:,:,1]))
+    range_violations = tf.reduce_mean(tf.maximum(0.0, amplitude - 2.0))  # Penalize >2.0 amplitude
+    range_score = -range_violations * quality_thresholds['range_weight']
+    
+    # Combine scores
+    total_quality = freq_smoothness + temporal_smoothness + energy_penalty + range_score
+    
+    return total_quality
+
+def get_prediction_confidence(model, x_target, n_samples=5, dropout_rate=0.1):
+    """
+    Get prediction confidence using multiple forward passes with dropout
+    """
+    predictions = []
+    
+    # Enable dropout during inference for variation
+    for i in range(n_samples):
+        # Use training=True to enable dropout during inference
+        pred, _ = model.generator(x_target, training=True)
+        predictions.append(pred)
+    
+    predictions = tf.stack(predictions, axis=0)  # (n_samples, batch, 132, 14, 2)
+    
+    # Calculate mean and variance
+    mean_pred = tf.reduce_mean(predictions, axis=0)
+    variance = tf.reduce_mean(tf.square(predictions - mean_pred), axis=0)
+    
+    # Confidence score: lower variance = higher confidence
+    confidence_score = 1.0 / (1.0 + tf.reduce_mean(variance, axis=[1,2,3]))
+    
+    return mean_pred, confidence_score
+
+def filter_confident_predictions(predictions, inputs, targets, confidence_scores, quality_scores,
+                                confidence_threshold=0.8, quality_threshold=0.5):
+    """
+    Filter predictions based on confidence and quality criteria
+    """
+    # Combined filtering criteria
+    confident_mask = (confidence_scores > confidence_threshold) & (quality_scores > quality_threshold)
+    
+    if tf.reduce_sum(tf.cast(confident_mask, tf.int32)) == 0:
+        return None, None, None, 0
+    
+    # Filter data
+    filtered_predictions = tf.boolean_mask(predictions, confident_mask)
+    filtered_inputs = tf.boolean_mask(inputs, confident_mask)
+    filtered_targets = tf.boolean_mask(targets, confident_mask) if targets is not None else None
+    
+    n_kept = tf.reduce_sum(tf.cast(confident_mask, tf.int32))
+    
+    return filtered_predictions, filtered_inputs, filtered_targets, n_kept
+
+def self_training_step(model, source_loader, target_loader, loss_fn, optimizers, 
+                    confidence_threshold=0.8, quality_threshold=0.5, 
+                    weights=None, lower_range=-1, linear_interp=False):
+    """
+    Single step of self-training: generate pseudo-labels and retrain
+    """
+    loader_H_input_train_src, loader_H_true_train_src = source_loader
+    loader_H_input_train_tgt, _ = target_loader  # No target labels available
+    
+    loss_fn_est = loss_fn[0]
+    gen_optimizer, disc_optimizer = optimizers[:2]
+    
+    adv_weight = weights.get('adv_weight', 0.01)
+    est_weight = weights.get('est_weight', 1.0)
+    
+    total_loss = 0.0
+    total_samples = 0
+    confident_samples = 0
+    
+    # Collect confident target pseudo-labels
+    target_inputs_confident = []
+    target_labels_confident = []
+    
+    print("=== Generating pseudo-labels for target domain ===")
+    
+    # Generate pseudo-labels for target domain
+    for batch_idx in range(loader_H_input_train_tgt.total_batches):
+        x_tgt = loader_H_input_train_tgt.next_batch()
+        
+        # Preprocess target
+        x_tgt_real = complx2real(x_tgt)
+        x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
+        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+        
+        # Generate predictions with confidence estimation
+        pred_tgt, confidence_scores = get_prediction_confidence(model, x_scaled_tgt, n_samples=5)
+        
+        # Assess quality
+        quality_scores = assess_channel_quality(pred_tgt)
+        
+        # Filter confident predictions
+        filtered_preds, filtered_inputs, _, n_kept = filter_confident_predictions(
+            pred_tgt, x_scaled_tgt, None, confidence_scores, quality_scores,
+            confidence_threshold, quality_threshold
+        )
+        
+        if filtered_preds is not None and n_kept > 0:
+            target_inputs_confident.append(filtered_inputs)
+            target_labels_confident.append(filtered_preds)
+            confident_samples += n_kept.numpy()
+        
+        total_samples += x_tgt.shape[0]
+    
+    print(f"Confident target samples: {confident_samples}/{total_samples} ({100*confident_samples/total_samples:.1f}%)")
+    
+    if confident_samples == 0:
+        print("No confident samples found - training on source only")
+        # Fall back to source-only training
+        return train_step_wgan_gp_source_only(model, (source_loader[0], source_loader[1], 
+                                                    target_loader[0], target_loader[0]), 
+                                            loss_fn, optimizers, lower_range, weights=weights)
+    
+    # Combine source and confident target data for retraining
+    print("=== Retraining with source + confident target data ===")
+    
+    epoch_loss = 0.0
+    n_train_batches = 0
+    
+    for batch_idx in range(loader_H_true_train_src.total_batches):
+        # Source data
+        x_src = loader_H_input_train_src.next_batch()
+        y_src = loader_H_true_train_src.next_batch()
+        
+        # Preprocess source
+        x_src_real = complx2real(x_src)
+        y_src_real = complx2real(y_src)
+        x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
+        y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = minmaxScaler(y_src_real, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+        
+        # Add confident target data if available
+        if target_inputs_confident and batch_idx < len(target_inputs_confident):
+            # Combine source and target data
+            x_combined = tf.concat([x_scaled_src, target_inputs_confident[batch_idx]], axis=0)
+            y_combined = tf.concat([y_scaled_src, target_labels_confident[batch_idx]], axis=0)
+        else:
+            x_combined = x_scaled_src
+            y_combined = y_scaled_src
+        
+        # Standard GAN training on combined data
+        with tf.GradientTape() as tape_d:
+            x_fake, _ = model.generator(x_combined, training=True)
+            d_real = model.discriminator(y_combined, training=True)
+            d_fake = model.discriminator(x_fake, training=True)
+            
+            gp = gradient_penalty(model.discriminator, y_combined, x_fake, batch_size=tf.shape(x_combined)[0])
+            d_loss = tf.reduce_mean(d_fake) - tf.reduce_mean(d_real) + 10.0 * gp
+            
+            if model.discriminator.losses:
+                d_loss += tf.add_n(model.discriminator.losses)
+        
+        grads_d = tape_d.gradient(d_loss, model.discriminator.trainable_variables)
+        disc_optimizer.apply_gradients(zip(grads_d, model.discriminator.trainable_variables))
+        
+        with tf.GradientTape() as tape_g:
+            x_fake, _ = model.generator(x_combined, training=True)
+            d_fake = model.discriminator(x_fake, training=False)
+            
+            g_adv_loss = -tf.reduce_mean(d_fake)
+            g_est_loss = loss_fn_est(y_combined, x_fake)
+            
+            g_loss = est_weight * g_est_loss + adv_weight * g_adv_loss
+            
+            if model.generator.losses:
+                g_loss += tf.add_n(model.generator.losses)
+        
+        grads_g = tape_g.gradient(g_loss, model.generator.trainable_variables)
+        gen_optimizer.apply_gradients(zip(grads_g, model.generator.trainable_variables))
+        
+        epoch_loss += g_loss.numpy()
+        n_train_batches += 1
+    
+    avg_loss = epoch_loss / n_train_batches if n_train_batches > 0 else 0
+    
+    return train_step_Output(
+        avg_epoc_loss_est=avg_loss,
+        avg_epoc_loss_domain=0.0,  # No domain loss in self-training
+        avg_epoc_loss=avg_loss,
+        avg_epoc_loss_est_target=0.0,
+        features_source=None,
+        film_features_source=None,
+        avg_epoc_loss_d=0.0
+    )
+
+def self_training_loop(model, source_loader, target_loader, loss_fn, optimizers, 
+                    n_iterations=5, weights=None, lower_range=-1, linear_interp=False):
+    """
+    Complete self-training loop
+    """
+    # Progressive threshold relaxation
+    confidence_thresholds = [0.9, 0.8, 0.7, 0.6, 0.5]  # Start strict, relax gradually
+    quality_thresholds = [0.8, 0.6, 0.4, 0.3, 0.2]
+    
+    results = []
+    
+    for iteration in range(n_iterations):
+        print(f"\n{'='*50}")
+        print(f"SELF-TRAINING ITERATION {iteration+1}/{n_iterations}")
+        print(f"{'='*50}")
+        
+        conf_thresh = confidence_thresholds[min(iteration, len(confidence_thresholds)-1)]
+        qual_thresh = quality_thresholds[min(iteration, len(quality_thresholds)-1)]
+        
+        print(f"Confidence threshold: {conf_thresh}")
+        print(f"Quality threshold: {qual_thresh}")
+        
+        # Single self-training step
+        step_result = self_training_step(
+            model, source_loader, target_loader, loss_fn, optimizers,
+            confidence_threshold=conf_thresh, 
+            quality_threshold=qual_thresh,
+            weights=weights, lower_range=lower_range, linear_interp=linear_interp
+        )
+        
+        results.append(step_result)
+        
+        print(f"Iteration {iteration+1} completed. Loss: {step_result.avg_epoc_loss:.6f}")
+    
+    return results
+
+def train_with_self_training(model, loaders, loss_fn, optimizers, weights, 
+                        n_epochs=200, self_training_start_epoch=50, self_training_interval=25):
+    """
+    Training with periodic self-training
+    """
+    loader_H_input_train_src, loader_H_true_train_src, \
+    loader_H_input_train_tgt, loader_H_true_train_tgt = loaders
+    
+    source_loader = (loader_H_input_train_src, loader_H_true_train_src)
+    target_loader = (loader_H_input_train_tgt, loader_H_true_train_tgt)
+    
+    metrics = {
+        'train_loss': [], 'train_est_loss': [], 'val_loss': [],
+        'val_est_loss_source': [], 'val_est_loss_target': [],
+        'nmse_val_source': [], 'nmse_val_target': []
+    }
+    
+    for epoch in range(n_epochs):
+        print(f"\n{'='*60}")
+        print(f"EPOCH {epoch+1}/{n_epochs}")
+        print(f"{'='*60}")
+        
+        # Regular training
+        if epoch < self_training_start_epoch or (epoch - self_training_start_epoch) % self_training_interval != 0:
+            # Source-only training
+            train_result = train_step_wgan_gp_source_only(
+                model, loaders, loss_fn, optimizers, weights=weights
+            )
+            print(f"Source-only training - Loss: {train_result.avg_epoc_loss:.6f}")
+        
+        else:
+            # Self-training
+            print("🔄 APPLYING SELF-TRAINING")
+            self_training_results = self_training_loop(
+                model, source_loader, target_loader, loss_fn, optimizers,
+                n_iterations=2,  # Short iterations during training
+                weights=weights
+            )
+            train_result = self_training_results[-1]  # Use last iteration result
+            print(f"Self-training completed - Loss: {train_result.avg_epoc_loss:.6f}")
+        
+        # Record metrics
+        metrics['train_loss'].append(train_result.avg_epoc_loss)
+        metrics['train_est_loss'].append(train_result.avg_epoc_loss_est)
+        
+        # Validation every 10 epochs
+        if (epoch + 1) % 10 == 0:
+            val_result = val_step_wgan_gp_source_only(model, loaders, loss_fn, weights=weights)
+            metrics['val_loss'].append(val_result[1]['avg_total_loss'])
+            metrics['val_est_loss_source'].append(val_result[1]['avg_loss_est_source'])
+            metrics['val_est_loss_target'].append(val_result[1]['avg_loss_est_target'])
+            metrics['nmse_val_source'].append(val_result[1]['avg_nmse_source'])
+            metrics['nmse_val_target'].append(val_result[1]['avg_nmse_target'])
+            
+            print(f"Validation - Source NMSE: {val_result[1]['avg_nmse_source']:.6f}, "
+                f"Target NMSE: {val_result[1]['avg_nmse_target']:.6f}")
+    
+    return model, metrics
+
+
+# CNN 
+class CNNGenerator(tf.keras.Model):
+    """
+    CNN using your existing SameShapeBlock
+    """
+    def __init__(self, output_channels=2, n_subc=132, gen_l2=None, 
+                n_blocks=12, base_filters=32, extract_layers=['block_5', 'block_6']):
+        super().__init__()
+        self.n_blocks = n_blocks
+        self.extract_layers = extract_layers
+        
+        # Input adaptation: 2 channels -> base_filters channels
+        self.input_conv = tf.keras.layers.Conv2D(
+            base_filters, (3, 3), padding='same', activation='relu',
+            kernel_regularizer=tf.keras.regularizers.l2(gen_l2) if gen_l2 else None
+        )
+        
+        # Use your existing SameShapeBlock with progressive channel expansion
+        self.blocks = []
+        for i in range(n_blocks):
+            # Progressive channel increase strategy
+            if i < 3:
+                filters = base_filters                    # Early blocks: 32 filters
+            elif i < 6:
+                filters = base_filters * 2               # Mid-early: 64 filters  
+            elif i < 9:
+                filters = base_filters * 4               # Mid-late: 128 filters
+            else:
+                filters = base_filters * 6               # Late blocks: 192 filters
+            
+            # Use your existing SameShapeBlock
+            block = SameShapeBlock(filters=filters, gen_l2=gen_l2)
+            self.blocks.append(block)
+        
+        # Output adaptation: final_filters -> output_channels
+        self.output_conv = tf.keras.layers.Conv2D(
+            output_channels, (3, 3), padding='same', activation='tanh',
+            kernel_regularizer=tf.keras.regularizers.l2(gen_l2) if gen_l2 else None
+        )
+    
+    def call(self, x, training=False, return_features=False):
+        # Input adaptation: (132, 14, 2) -> (132, 14, base_filters)
+        out = self.input_conv(x)
+        
+        # Store intermediate features for extraction
+        block_outputs = {}
+        
+        # Process through your SameShapeBlocks
+        for i, block in enumerate(self.blocks):
+            out = block(out, training=training)
+            block_outputs[f'block_{i+1}'] = out
+        
+        # Output adaptation: (132, 14, final_filters) -> (132, 14, 2)
+        output = self.output_conv(out)
+        
+        # Feature extraction for domain adaptation
+        features = []
+        for layer_name in self.extract_layers:
+            if layer_name in block_outputs:
+                feature_tensor = block_outputs[layer_name]
+                features.append(tf.reshape(feature_tensor, [tf.shape(feature_tensor)[0], -1]))
+        
+        return output, features

@@ -23,27 +23,36 @@ from Domain_Adversarial.helper import loader, plotfig, PAD
 from Domain_Adversarial.helper.utils import H5BatchLoader
 from Domain_Adversarial.helper.utils_GAN import visualize_H
 from JMMD.helper.utils_GAN import save_checkpoint_jmmd as save_checkpoint
+from JMMD.helper.utils_GAN import WeightScheduler
 
 SNR = -5
 # source_data_file_path_label = os.path.abspath(os.path.join(code_dir, '..', 'generatedChan', 'OpenNTN','H_perfect.mat'))
-source_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_A', f'SNR_{SNR}dB', 'matlabNTN.mat'))
-target_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_C', f'SNR_{SNR}dB', 'matlabNTN.mat'))
+source_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_D_30_sim', f'SNR_{SNR}dB', 'matlabNTN.mat'))
+target_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_B_100_300_sim', f'SNR_{SNR}dB', 'matlabNTN.mat'))
 norm_approach = 'minmax' # can be set to 'std'
 lower_range = -1 
     # if norm_approach = 'minmax': 
         # =  0 for scaling to  [0 1]
         # = -1 for scaling to [-1 1]
     # if norm_approach = 'std': can be any value, but need to be defined
-weights = {
-    # Core loss weights
-    'adv_weight': 0.005,        # GAN adversarial loss weight
-    'est_weight': 1.0,          # Estimation loss weight (main task)
-    'domain_weight': 0.5,       # JMMD loss weight (domain adaptation)
+# weights = {
+#     # Core loss weights
+#     'adv_weight': 0.05,        # GAN adversarial loss weight
+#     'est_weight': 0.6,          # Estimation loss weight (main task)
+#     'domain_weight': 1.5,       # JMMD loss weight (domain adaptation)
     
-    # Smoothness regularization weights
-    'temporal_weight': 0.02,    # Temporal smoothness penalty
-    'frequency_weight': 0.1,    # Frequency smoothness penalty
-}
+#     # Smoothness regularization weights
+#     'temporal_weight': 0.02,    # Temporal smoothness penalty
+#     'frequency_weight': 0.1,    # Frequency smoothness penalty
+# }
+# print('adv_weight = ', weights['adv_weight'], ', est_weight = ', weights['est_weight'], ', domain_weight = ', weights['domain_weight'])
+
+scheduler = WeightScheduler(strategy='reconstruction_first', start_domain_weight=0.01, end_domain_weight=1.5,
+                            start_est_weight=1.5, end_est_weight=0.8, warmup_epochs=80) 
+                            # adv_weight = 0.005 default
+                            # warmup_epochs=150 default
+                            # schedule_type = 'linear' default
+
 
 if norm_approach == 'minmax':
     if lower_range == 0:
@@ -54,10 +63,12 @@ elif norm_approach == 'no':
     norm_txt = 'No'
     
 # Paths to save
-idx_save_path = loader.find_incremental_filename(project_root + '/JMMD/model/GAN','ver', '_', '')
+path_temp = code_dir + f'/results/'
+os.makedirs(os.path.dirname(path_temp), exist_ok=True)
+idx_save_path = loader.find_incremental_filename(path_temp,'ver', '_', '')
 
-save_model = 1
-model_path = project_root + '/JMMD/model/GAN/ver' + str(idx_save_path) + '_'
+save_model = False
+model_path = code_dir + f'/results/ver' + str(idx_save_path) + '_'
 # figure_path = code_dir + '/model/GAN/ver' + str(idx_save_path) + '_/figure'
 model_readme = model_path + '/readme.txt'
 
@@ -139,18 +150,18 @@ class_dict_target = {
 loss_fn_ce = tf.keras.losses.MeanSquaredError()  # Channel estimation loss (generator loss)
 loss_fn_bce = tf.keras.losses.BinaryCrossentropy(from_logits=False) # Binary cross-entropy loss for discriminator
 
-from JMMD.helper.utils_GAN import GAN
-from JMMD.helper.utils_GAN import train_step_wgan_gp_jmmd, val_step_wgan_gp_jmmd, post_val
+from JMMD.helper.utils_GAN import GAN, Pix2PixGenerator, CNNGenerator
+from JMMD.helper.utils_GAN import train_step_wgan_gp_jmmd, val_step_wgan_gp_jmmd, post_val, train_step_wgan_gp_jmmd_normalized, val_step_wgan_gp_jmmd_normalized
 
 import time
 start = time.perf_counter()
 
+# n_epochs= 300 # 300
+# epoch_min = 100
+# epoch_step = 20
 n_epochs= 5
 epoch_min = 0
 epoch_step = 1
-# n_epochs= 3
-# epoch_min = 0
-# epoch_step = 1
 
 sub_folder_ = ['GAN_practical']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
 
@@ -164,8 +175,8 @@ for sub_folder in sub_folder_:
         'w_dist': {}            # Dictionary to store Wasserstein distances by epoch
     }
     linear_interp = False
-    if sub_folder == 'GAN_linear':
-        linear_interp =True # flag to clip values that go beyond the estimated pilot (min, max)
+    # if sub_folder == 'GAN_linear':
+    #     linear_interp =True # flag to clip values that go beyond the estimated pilot (min, max)
     ##
     loader_H_true_train_source = class_dict_source[sub_folder].true_train
     loader_H_input_train_source = class_dict_source[sub_folder].input_train
@@ -244,7 +255,8 @@ for sub_folder in sub_folder_:
     perform_to_save = {}    # list to save to .mat file for nmse, losses,...
 
     # 
-    model = GAN(n_subc=312, gen_l2=None, disc_l2=1e-5)  # l2 regularization for generator and discriminator
+    genertor = CNNGenerator()
+    model = GAN(generator=genertor, n_subc=312, gen_l2=None, disc_l2=1e-5)  # l2 regularization for generator and discriminator
     # 
     gen_optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4, beta_1=0.5, beta_2=0.9)
     disc_optimizer = tf.keras.optimizers.Adam(learning_rate=1e-5, beta_1=0.5, beta_2=0.9)  # WGAN-GP uses Adam optimizer with beta_1=0.5
@@ -256,6 +268,10 @@ for sub_folder in sub_folder_:
     flag = 1 # flag to plot and save H_true
     epoc_pad = []    # epochs that calculating pad (return_features == True)
     for epoch in range(n_epochs):
+        # get weights 
+        weights = scheduler.get_weights_domain_first_smooth(epoch, n_epochs)
+        print(f"Epoch {epoch+1}/{n_epochs}, Weights: {weights}")
+        
         # ===================== Training =====================
         loader_H_true_train_source.reset()
         # loader_H_practical_train_source.reset()
@@ -280,7 +296,7 @@ for sub_folder in sub_folder_:
 
         ##########################
         # 
-        train_step_output = train_step_wgan_gp_jmmd(model, loader_H, loss_fn, optimizer, lower_range=-1, 
+        train_step_output = train_step_wgan_gp_jmmd_normalized(model, loader_H, loss_fn, optimizer, lower_range=-1, 
                         save_features=True, weights=weights, linear_interp=linear_interp)
 
         train_epoc_loss_est        = train_step_output.avg_epoc_loss_est
@@ -295,7 +311,7 @@ for sub_folder in sub_folder_:
                 # All are already calculated in average over training dataset (source/target - respectively)
         print("Time", time.perf_counter() - start, "seconds")
         # Calculate PAD for the extracted features
-        if return_features and (weights['domain_weight']!=0):
+        if return_features and (weights['domain_weight']!=0) and (epoch==0 or epoch == n_epochs-1):
             features_source_file = "features_source.h5"
             features_target_file = "features_target.h5"
             print(f"epoch {epoch+1}/{n_epochs}")
@@ -356,16 +372,18 @@ for sub_folder in sub_folder_:
         loss_fn = [loss_fn_ce, loss_fn_bce]
         
         # eval_func = utils_UDA_FiLM.val_step
-        if (epoch==epoch_min) or (epoch+1>epoch_min and (epoch-epoch_min)%epoch_step==0) or epoch==n_epochs-1:
+        if (epoch==epoch_min) or (epoch+1>epoch_min and (epoch-epoch_min)%epoch_step==0) and epoch!=n_epochs-1:
             # 
-            H_sample, epoc_val_return = val_step_wgan_gp_jmmd(model, loader_H_eval, loss_fn, lower_range, 
+            H_sample, epoc_val_return = val_step_wgan_gp_jmmd_normalized(model, loader_H_eval, loss_fn, lower_range, 
                                             weights=weights, linear_interp=linear_interp)
             visualize_H(H_sample, H_to_save, epoch, plotfig.figChan, flag, model_path, sub_folder, domain_weight=weights['domain_weight'])
             flag = 0  # after the first epoch, no need to save H_true anymore
-            
+        elif epoch==n_epochs-1:
+            _, epoc_val_return, H_val_gen = val_step_wgan_gp_jmmd_normalized(model, loader_H_eval, loss_fn, lower_range, 
+                                            weights=weights, linear_interp=linear_interp, return_H_gen=True)    
         else:
             # 
-            _, epoc_val_return = val_step_wgan_gp_jmmd(model, loader_H_eval, loss_fn, lower_range, 
+            _, epoc_val_return = val_step_wgan_gp_jmmd_normalized(model, loader_H_eval, loss_fn, lower_range, 
                                         weights=weights, linear_interp=linear_interp)
         
         post_val(epoc_val_return, epoch, n_epochs, val_metrics, domain_weight=weights['domain_weight'])
@@ -392,6 +410,9 @@ for sub_folder in sub_folder_:
     # Save performances
     # Save H matrix
     savemat(model_path + '/' + sub_folder + '/H_visualize/H_trix.mat', H_to_save)
-
-# end of trainmode   
+    savemat(model_path + '/' + sub_folder + '/H_visualize/H_val_generated.mat', 
+        {'H_val_gen': H_val_gen,
+        'indices_val_source': indices_val_source,
+        'indices_val_target': indices_val_target})
+# end of trainmode   (for sub_folder loop)
     
