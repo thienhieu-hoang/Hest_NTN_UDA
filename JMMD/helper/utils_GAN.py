@@ -4512,3 +4512,369 @@ def val_step_cnn_residual_jmmd(model_cnn, loader_H, loss_fn, lower_range, nsymb=
     if return_H_gen:
         return H_sample, epoc_eval_return, H_gen
     return H_sample, epoc_eval_return 
+
+def train_step_cnn_residual_source_only(model_cnn, loader_H, loss_fn, optimizer, lower_range=-1, 
+                                    save_features=False, nsymb=14, weights=None, linear_interp=False):
+    """
+    CNN-only residual training step using only source domain (no domain adaptation)
+    Model predicts residual correction for source domain only
+    
+    Args:
+        model_cnn: CNN model (CNNGenerator instance, not GAN wrapper)
+        loader_H: tuple of (loader_H_input_train_src, loader_H_true_train_src, 
+                          loader_H_input_train_tgt, loader_H_true_train_tgt) - tgt used only for monitoring
+        loss_fn: tuple of loss functions (estimation_loss, bce_loss) - only first one used
+        optimizer: single optimizer for CNN
+        lower_range: lower range for min-max scaling
+        save_features: bool, whether to save features for PAD computation
+        nsymb: number of symbols
+        weights: weight dictionary
+        linear_interp: linear interpolation flag
+    """
+    loader_H_input_train_src, loader_H_true_train_src, \
+        loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
+    loss_fn_est = loss_fn[0]  # Only need estimation loss
+    
+    est_weight = weights.get('est_weight', 1.0)
+    temporal_weight = weights.get('temporal_weight', 0.0)
+    frequency_weight = weights.get('frequency_weight', 0.0)
+    
+    epoc_loss_total = 0.0
+    epoc_loss_est = 0.0
+    epoc_loss_est_tgt = 0.0  # For monitoring target performance
+    epoc_residual_norm = 0.0  # Track residual magnitude
+    N_train = 0
+    
+    if save_features:
+        features_h5_path_source = 'features_source.h5'
+        if os.path.exists(features_h5_path_source):
+            os.remove(features_h5_path_source)
+        features_h5_source = h5py.File(features_h5_path_source, 'w')
+        features_dataset_source = None
+
+        features_h5_path_target = 'features_target.h5'
+        if os.path.exists(features_h5_path_target):
+            os.remove(features_h5_path_target)   
+        features_h5_target = h5py.File(features_h5_path_target, 'w')
+        features_dataset_target = None
+    
+    for batch_idx in range(loader_H_true_train_src.total_batches):
+        # --- Get SOURCE data for training ---
+        x_src = loader_H_input_train_src.next_batch()
+        y_src = loader_H_true_train_src.next_batch()
+        N_train += x_src.shape[0]
+
+        # Preprocess source data
+        x_src = complx2real(x_src)
+        y_src = complx2real(y_src)
+        x_src = np.transpose(x_src, (0, 2, 3, 1))
+        y_src = np.transpose(y_src, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = minmaxScaler(y_src, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+
+        # === Train CNN with RESIDUAL learning - Source only ===
+        with tf.GradientTape() as tape:
+            # RESIDUAL LEARNING: Predict correction for source domain
+            residual_src, features_src = model_cnn(x_scaled_src, training=True, return_features=True)
+            x_corrected_src = x_scaled_src + residual_src  # Apply residual correction
+            
+            # Estimation loss: Corrected source channels should match perfect source
+            est_loss = loss_fn_est(y_scaled_src, x_corrected_src)
+            
+            # Residual regularization: Encourage small, meaningful corrections
+            residual_reg = 0.001 * tf.reduce_mean(tf.square(residual_src))
+            
+            # Smoothness loss on corrected source channels (optional)
+            if temporal_weight != 0 or frequency_weight != 0:
+                smoothness_loss = compute_total_smoothness_loss(x_corrected_src, 
+                                                              temporal_weight=temporal_weight, 
+                                                              frequency_weight=frequency_weight)
+            else:
+                smoothness_loss = 0.0
+            
+            # Total loss (no domain adaptation)
+            total_loss = est_weight * est_loss + residual_reg + smoothness_loss
+            
+            # Add L2 regularization from model
+            if model_cnn.losses:
+                total_loss += tf.add_n(model_cnn.losses)
+        
+        # Single optimizer update
+        grads = tape.gradient(total_loss, model_cnn.trainable_variables)
+        optimizer.apply_gradients(zip(grads, model_cnn.trainable_variables))
+        
+        epoc_loss_total += total_loss.numpy() * x_src.shape[0]
+        epoc_loss_est += est_loss.numpy() * x_src.shape[0]
+        epoc_residual_norm += tf.reduce_mean(tf.abs(residual_src)).numpy() * x_src.shape[0]
+
+        # === Optional: Monitor target performance (no training) ===
+        if batch_idx < loader_H_true_train_tgt.total_batches:
+            try:
+                x_tgt = loader_H_input_train_tgt.next_batch()
+                y_tgt = loader_H_true_train_tgt.next_batch()
+                
+                # Preprocess target data
+                x_tgt = complx2real(x_tgt)
+                y_tgt = complx2real(y_tgt)
+                x_tgt = np.transpose(x_tgt, (0, 2, 3, 1))
+                y_tgt = np.transpose(y_tgt, (0, 2, 3, 1))
+                x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt, lower_range=lower_range, linear_interp=linear_interp)
+                y_scaled_tgt, _, _ = minmaxScaler(y_tgt, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+                
+                # Test on target (no gradients) - residual learning
+                residual_tgt, features_tgt = model_cnn(x_scaled_tgt, training=False, return_features=True)
+                x_corrected_tgt = x_scaled_tgt + residual_tgt  # Apply residual correction
+                est_loss_tgt = loss_fn_est(y_scaled_tgt, x_corrected_tgt)
+                epoc_loss_est_tgt += est_loss_tgt.numpy() * x_tgt.shape[0]
+                
+            except StopIteration:
+                # Target loader exhausted - skip monitoring for remaining batches
+                pass
+        
+        # === Save features if required ===
+        if save_features:
+            # Save source features
+            features_np_source = features_src[-1].numpy()
+            if features_dataset_source is None:
+                features_dataset_source = features_h5_source.create_dataset(
+                    'features',
+                    data=features_np_source,
+                    maxshape=(None,) + features_np_source.shape[1:],
+                    chunks=True
+                )
+            else:
+                features_dataset_source.resize(features_dataset_source.shape[0] + features_np_source.shape[0], axis=0)
+                features_dataset_source[-features_np_source.shape[0]:] = features_np_source
+            
+            # Save target features if available (for monitoring)
+            if batch_idx < loader_H_true_train_tgt.total_batches and 'features_tgt' in locals():
+                features_np_target = features_tgt[-1].numpy()
+                if features_dataset_target is None:
+                    features_dataset_target = features_h5_target.create_dataset(
+                        'features',
+                        data=features_np_target,
+                        maxshape=(None,) + features_np_target.shape[1:],
+                        chunks=True
+                    )
+                else:
+                    features_dataset_target.resize(features_dataset_target.shape[0] + features_np_target.shape[0], axis=0)
+                    features_dataset_target[-features_np_target.shape[0]:] = features_np_target
+
+    # Close feature files
+    if save_features:    
+        features_h5_source.close()
+        if features_dataset_target is not None:
+            features_h5_target.close()
+
+    # Calculate averages
+    avg_loss_total = epoc_loss_total / N_train
+    avg_loss_est = epoc_loss_est / N_train
+    avg_loss_est_tgt = epoc_loss_est_tgt / N_train if epoc_loss_est_tgt > 0 else 0.0
+    avg_residual_norm = epoc_residual_norm / N_train
+    
+    # Print residual statistics
+    print(f"    Source residual norm (avg): {avg_residual_norm:.6f}")
+    
+    # Return compatible structure (no domain adaptation)
+    return train_step_Output(
+        avg_epoc_loss_est=avg_loss_est,
+        avg_epoc_loss_domain=0.0,  # No domain adaptation
+        avg_epoc_loss=avg_loss_total,
+        avg_epoc_loss_est_target=avg_loss_est_tgt,
+        features_source=features_src[-1] if 'features_src' in locals() else None,
+        film_features_source=features_src[-1] if 'features_src' in locals() else None,
+        avg_epoc_loss_d=0.0  # No discriminator
+    )
+    
+def val_step_cnn_residual_source_only(model_cnn, loader_H, loss_fn, lower_range, nsymb=14, 
+                                    weights=None, linear_interp=False, return_H_gen=False):
+    """
+    Validation step for CNN-only residual source training.
+    Validates on source domain, tests on target domain.
+    
+    Args:
+        model_cnn: CNN model (CNNGenerator instance, not GAN wrapper)
+        loader_H: tuple of validation loaders
+        loss_fn: tuple of loss functions (only first one used)
+        lower_range: lower range for min-max scaling
+        nsymb: number of symbols
+        weights: weight dictionary
+        linear_interp: linear interpolation flag
+        return_H_gen: whether to return generated H matrices
+    """
+    loader_H_input_val_source, loader_H_true_val_source, loader_H_input_val_target, loader_H_true_val_target = loader_H
+    loss_fn_est = loss_fn[0]  # Only need estimation loss
+    
+    est_weight = weights.get('est_weight', 1.0)
+    temporal_weight = weights.get('temporal_weight', 0.0)
+    frequency_weight = weights.get('frequency_weight', 0.0)
+    
+    N_val_source = 0
+    N_val_target = 0
+    epoc_loss_est_source = 0.0
+    epoc_loss_est_target = 0.0  # This is now testing on target
+    epoc_nmse_val_source = 0.0
+    epoc_nmse_val_target = 0.0  # This is now testing on target
+    epoc_residual_norm = 0.0    # Track residual magnitude
+    H_sample = []
+    
+    if return_H_gen:
+        all_H_gen_src = []
+        all_H_gen_tgt = []
+
+    # --- Source domain validation ---
+    for idx in range(loader_H_true_val_source.total_batches):
+        x_src = loader_H_input_val_source.next_batch()
+        y_src = loader_H_true_val_source.next_batch()
+        N_val_source += x_src.shape[0]
+
+        # Preprocess source
+        x_src_real = complx2real(x_src)
+        y_src_real = complx2real(y_src)
+        x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
+        y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = minmaxScaler(y_src_real, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+
+        # === RESIDUAL LEARNING: Source validation prediction ===
+        residual_src, features_src = model_cnn(x_scaled_src, training=False, return_features=True)
+        preds_src = x_scaled_src + residual_src  # Apply residual correction
+        
+        # Safe tensor conversion
+        if hasattr(preds_src, 'numpy'):
+            preds_src_numpy = preds_src.numpy()
+        else:
+            preds_src_numpy = preds_src
+            
+        preds_src_descaled = deMinMax(preds_src_numpy, x_min_src, x_max_src, lower_range=lower_range)
+        batch_est_loss_source = loss_fn_est(y_scaled_src, preds_src).numpy()
+        epoc_loss_est_source += batch_est_loss_source * x_src.shape[0]
+        
+        # Source NMSE
+        mse_val_source = np.mean((preds_src_descaled - y_src_real) ** 2, axis=(1, 2, 3))
+        power_source = np.mean(y_src_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_source += np.mean(mse_val_source / (power_source + 1e-30)) * x_src.shape[0]
+
+        # Track source residual magnitude
+        residual_src_norm = tf.reduce_mean(tf.square(residual_src)).numpy()
+        epoc_residual_norm += residual_src_norm * x_src.shape[0]
+
+        # Save source samples from first batch
+        if idx == 0:
+            n_samples = min(3, x_src_real.shape[0])
+            H_true_sample = y_src_real[:n_samples].copy()
+            H_input_sample = x_src_real[:n_samples].copy()
+            if hasattr(preds_src_descaled, 'numpy'):
+                H_est_sample = preds_src_descaled[:n_samples].numpy().copy()
+            else:
+                H_est_sample = preds_src_descaled[:n_samples].copy()
+            
+            mse_sample_source = np.mean((H_est_sample - H_true_sample) ** 2, axis=(1, 2, 3))
+            power_sample_source = np.mean(H_true_sample ** 2, axis=(1, 2, 3))
+            nmse_est_source = mse_sample_source / (power_sample_source + 1e-30)
+            mse_input_source = np.mean((H_input_sample - H_true_sample) ** 2, axis=(1, 2, 3))
+            nmse_input_source = mse_input_source / (power_sample_source + 1e-30)
+
+        if return_H_gen:
+            H_gen_src_batch = preds_src_descaled.numpy().copy() if hasattr(preds_src_descaled, 'numpy') else preds_src_descaled.copy()
+            all_H_gen_src.append(H_gen_src_batch)
+
+    # --- Target domain testing (separate loop to handle different batch sizes) ---
+    for idx in range(loader_H_true_val_target.total_batches):
+        x_tgt = loader_H_input_val_target.next_batch()
+        y_tgt = loader_H_true_val_target.next_batch()
+        N_val_target += x_tgt.shape[0]
+
+        # Preprocess target
+        x_tgt_real = complx2real(x_tgt)
+        y_tgt_real = complx2real(y_tgt)
+        x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
+        y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
+        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_tgt, _, _ = minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+
+        # === RESIDUAL LEARNING: Target testing prediction ===
+        residual_tgt, features_tgt = model_cnn(x_scaled_tgt, training=False, return_features=True)
+        preds_tgt = x_scaled_tgt + residual_tgt  # Apply residual correction
+        
+        # Safe tensor conversion
+        if hasattr(preds_tgt, 'numpy'):
+            preds_tgt_numpy = preds_tgt.numpy()
+        else:
+            preds_tgt_numpy = preds_tgt
+            
+        preds_tgt_descaled = deMinMax(preds_tgt_numpy, x_min_tgt, x_max_tgt, lower_range=lower_range)
+        batch_est_loss_target = loss_fn_est(y_scaled_tgt, preds_tgt).numpy()
+        epoc_loss_est_target += batch_est_loss_target * x_tgt.shape[0]
+        
+        # Target NMSE
+        mse_val_target = np.mean((preds_tgt_descaled - y_tgt_real) ** 2, axis=(1, 2, 3))
+        power_target = np.mean(y_tgt_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_target += np.mean(mse_val_target / (power_target + 1e-30)) * x_tgt.shape[0]
+
+        # Save target samples from first batch
+        if idx == 0:
+            n_samples = min(3, x_tgt_real.shape[0])
+            H_true_sample_target = y_tgt_real[:n_samples].copy()
+            H_input_sample_target = x_tgt_real[:n_samples].copy()
+            if hasattr(preds_tgt_descaled, 'numpy'):
+                H_est_sample_target = preds_tgt_descaled[:n_samples].numpy().copy()
+            else:
+                H_est_sample_target = preds_tgt_descaled[:n_samples].copy()
+            
+            mse_sample_target = np.mean((H_est_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            power_sample_target = np.mean(H_true_sample_target ** 2, axis=(1, 2, 3))
+            nmse_est_target = mse_sample_target / (power_sample_target + 1e-30)
+            mse_input_target = np.mean((H_input_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            nmse_input_target = mse_input_target / (power_sample_target + 1e-30)
+            
+            # Combine source and target samples (same format as GAN version)
+            H_sample = [H_true_sample, H_input_sample, H_est_sample, nmse_input_source, nmse_est_source,
+                    H_true_sample_target, H_input_sample_target, H_est_sample_target, nmse_input_target, nmse_est_target]
+
+        if return_H_gen:
+            H_gen_tgt_batch = preds_tgt_descaled.numpy().copy() if hasattr(preds_tgt_descaled, 'numpy') else preds_tgt_descaled.copy()
+            all_H_gen_tgt.append(H_gen_tgt_batch)
+    
+    if return_H_gen:
+        # Concatenate all batches along the batch dimension (axis=0)
+        H_gen_src_all = np.concatenate(all_H_gen_src, axis=0)
+        H_gen_tgt_all = np.concatenate(all_H_gen_tgt, axis=0)
+        H_gen = {
+            'H_gen_src': H_gen_src_all,
+            'H_gen_tgt': H_gen_tgt_all
+        }
+            
+    # Calculate averages
+    avg_loss_est_source = epoc_loss_est_source / N_val_source
+    avg_loss_est_target = epoc_loss_est_target / N_val_target  # This is testing performance
+    avg_nmse_source = epoc_nmse_val_source / N_val_source
+    avg_nmse_target = epoc_nmse_val_target / N_val_target  # This is testing performance
+    avg_residual_norm = epoc_residual_norm / N_val_source
+
+    # Print residual statistics
+    print(f"    Validation residual norm (avg): {avg_residual_norm:.6f}")
+
+    # Total loss (source validation only)
+    avg_total_loss = est_weight * avg_loss_est_source
+
+    # Return compatible structure
+    epoc_eval_return = {
+        'avg_total_loss': avg_total_loss,
+        'avg_loss_est_source': avg_loss_est_source,
+        'avg_loss_est_target': avg_loss_est_target,  # This is testing loss
+        'avg_loss_est': avg_loss_est_source,  # Use source for validation
+        'avg_gan_disc_loss': 0.0,  # No discriminator
+        'avg_jmmd_loss': 0.0,  # No domain adaptation
+        'avg_nmse_source': avg_nmse_source,
+        'avg_nmse_target': avg_nmse_target,  # This is testing NMSE
+        'avg_nmse': avg_nmse_source,  # Use source for validation
+        'avg_domain_acc_source': 0.5,  # Neutral placeholder
+        'avg_domain_acc_target': 0.5,  # Neutral placeholder
+        'avg_domain_acc': 0.5,         # Neutral placeholder
+        'avg_smoothness_loss': 0.0
+    }
+    
+    if return_H_gen:
+        return H_sample, epoc_eval_return, H_gen
+    return H_sample, epoc_eval_return
