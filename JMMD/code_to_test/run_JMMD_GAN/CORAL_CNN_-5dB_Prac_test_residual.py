@@ -39,7 +39,7 @@ lower_range = -1
 #     # Core loss weights
 #     'adv_weight': 0.05,        # GAN adversarial loss weight
 #     'est_weight': 0.6,          # Estimation loss weight (main task)
-#     'domain_weight': 1.5,       # JMMD loss weight (domain adaptation)
+#     'domain_weight': 1.5,       # CORAL loss weight (domain adaptation)
     
 #     # Smoothness regularization weights
 #     'temporal_weight': 0.02,    # Temporal smoothness penalty
@@ -72,7 +72,7 @@ model_path = code_dir + f'/results/ver' + str(idx_save_path) + '_'
 # figure_path = code_dir + '/model/GAN/ver' + str(idx_save_path) + '_/figure'
 model_readme = model_path + '/readme.txt'
 
-batch_size=16
+batch_size= 8 # 16
 
 # ============ Source data ==============
 source_file = h5py.File(source_data_file_path, 'r')
@@ -151,7 +151,7 @@ loss_fn_ce = tf.keras.losses.MeanSquaredError()  # Channel estimation loss (gene
 loss_fn_bce = tf.keras.losses.BinaryCrossentropy(from_logits=False) # Binary cross-entropy loss for discriminator
 
 from JMMD.helper.utils_GAN import CNNGenerator
-from JMMD.helper.utils_GAN import post_val, train_step_cnn_residual_jmmd, val_step_cnn_residual_jmmd
+from JMMD.helper.utils_GAN import post_val, train_step_cnn_residual_coral, val_step_cnn_residual_coral
 
 import time
 start = time.perf_counter()
@@ -229,7 +229,7 @@ for sub_folder in sub_folder_:
         'train_loss': [],           # total training loss 
         'train_est_loss': [],       # estimation loss
         'train_disc_loss': [],      # discriminator loss
-        'train_domain_loss': [],    # JMMD loss (replaces domain loss)
+        'train_domain_loss': [],    # CORAL loss (replaces domain loss)
         'train_est_loss_target': [] # target estimation loss (monitoring)
     }
     
@@ -237,13 +237,13 @@ for sub_folder in sub_folder_:
     val_metrics = {
         'val_loss': [],                 # total validation loss
         'val_gan_disc_loss': [],        # GAN discriminator loss
-        'val_domain_disc_loss': [],     # JMMD loss (replaces domain discriminator)
+        'val_domain_disc_loss': [],     # CORAL loss (replaces domain discriminator)
         'val_est_loss_source': [],      # source estimation loss
         'val_est_loss_target': [],      # target estimation loss  
         'val_est_loss': [],             # average estimation loss
-        'source_acc': [],               # source domain accuracy (placeholder for JMMD)
-        'target_acc': [],               # target domain accuracy (placeholder for JMMD)
-        'acc': [],                      # average accuracy (placeholder for JMMD)
+        'source_acc': [],               # source domain accuracy (placeholder for CORAL)
+        'target_acc': [],               # target domain accuracy (placeholder for CORAL)
+        'acc': [],                      # average accuracy (placeholder for CORAL)
         'nmse_val_source': [],          # source NMSE
         'nmse_val_target': [],          # target NMSE
         'nmse_val': [],                  # average NMSE
@@ -254,11 +254,10 @@ for sub_folder in sub_folder_:
     perform_to_save = {}    # list to save to .mat file for nmse, losses,...
 
     # 
-    model = CNNGenerator()
+    model = CNNGenerator(extract_layers=['block_5','block_6'])
     # 
-    ####
     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4, beta_1=0.5, beta_2=0.9)
-    ####
+    # 
     
     flag = 1 # flag to plot and save H_true
     epoc_pad = []    # epochs that calculating pad (return_features == True)
@@ -291,15 +290,15 @@ for sub_folder in sub_folder_:
 
         ##########################
         # 
-        train_step_output = train_step_cnn_residual_jmmd(model, loader_H, loss_fn, optimizer, lower_range=-1, 
+        train_step_output = train_step_cnn_residual_coral(model, loader_H, loss_fn, optimizer, lower_range=-1, 
                         save_features=False, weights=weights, linear_interp=linear_interp)
 
         train_epoc_loss_est        = train_step_output.avg_epoc_loss_est
         train_epoc_loss_d          = train_step_output.avg_epoc_loss_d
-        train_epoc_loss_domain     = train_step_output.avg_epoc_loss_domain  # Now contains JMMD loss
+        train_epoc_loss_domain     = train_step_output.avg_epoc_loss_domain  # Now contains CORAL loss
         train_epoc_loss            = train_step_output.avg_epoc_loss
         train_epoc_loss_est_target = train_step_output.avg_epoc_loss_est_target
-                # train_epoc_loss        = total train loss = loss_est + lambda_jmmd * jmmd_loss
+                # train_epoc_loss        = total train loss = loss_est + lambda_coral * coral_loss
                 # train_epoc_loss_est    = loss in estimation network in source domain (labels available)
                 # train_epoc_loss_domain = JMMD loss (statistical distribution matching)
                 # train_epoc_loss_est_target - just to monitor - the machine can not calculate because no label available in source domain
@@ -350,7 +349,7 @@ for sub_folder in sub_folder_:
         print(f"epoch {epoch+1}/{n_epochs} Average Disc Loss (in Source domain): {train_epoc_loss_d:.6f}")
         
         train_metrics['train_domain_loss'].append(train_epoc_loss_domain)
-        print(f"epoch {epoch+1}/{n_epochs} Average JMMD Loss: {train_epoc_loss_domain:.6f}")  # Updated print message
+        print(f"epoch {epoch+1}/{n_epochs} Average CORAL Loss: {train_epoc_loss_domain:.6f}")  # Updated print message
         
         train_metrics['train_est_loss_target'].append(train_epoc_loss_est_target)
         print(f"epoch {epoch+1}/{n_epochs} For observation only - Average Estimation Loss in Target domain: {train_epoc_loss_est_target:.6f}")
@@ -369,16 +368,16 @@ for sub_folder in sub_folder_:
         # eval_func = utils_UDA_FiLM.val_step
         if (epoch==epoch_min) or (epoch+1>epoch_min and (epoch-epoch_min)%epoch_step==0) and epoch!=n_epochs-1:
             # 
-            H_sample, epoc_val_return = val_step_cnn_residual_jmmd(model, loader_H_eval, loss_fn, lower_range, 
+            H_sample, epoc_val_return = val_step_cnn_residual_coral(model, loader_H_eval, loss_fn, lower_range, 
                                             weights=weights, linear_interp=linear_interp)
             visualize_H(H_sample, H_to_save, epoch, plotfig.figChan, flag, model_path, sub_folder, domain_weight=weights['domain_weight'])
             flag = 0  # after the first epoch, no need to save H_true anymore
         elif epoch==n_epochs-1:
-            _, epoc_val_return, H_val_gen = val_step_cnn_residual_jmmd(model, loader_H_eval, loss_fn, lower_range, 
+            _, epoc_val_return, H_val_gen = val_step_cnn_residual_coral(model, loader_H_eval, loss_fn, lower_range, 
                                             weights=weights, linear_interp=linear_interp, return_H_gen=True)    
         else:
             # 
-            _, epoc_val_return = val_step_cnn_residual_jmmd(model, loader_H_eval, loss_fn, lower_range, 
+            _, epoc_val_return = val_step_cnn_residual_coral(model, loader_H_eval, loss_fn, lower_range, 
                                         weights=weights, linear_interp=linear_interp)
         
         post_val(epoc_val_return, epoch, n_epochs, val_metrics, domain_weight=weights['domain_weight'])
@@ -409,4 +408,5 @@ for sub_folder in sub_folder_:
         {'H_val_gen': H_val_gen,
         'indices_val_source': indices_val_source,
         'indices_val_target': indices_val_target})
-# end of trainmode   (for sub_folder loop)
+# end of trainmode  
+

@@ -3660,13 +3660,21 @@ class CNNGenerator(tf.keras.Model):
         self.blocks = []
         for i in range(n_blocks):
             # Pyramid channel progression strategy
-            if i < n_blocks // 2:
+            if i ==0:
+                filters = 64
+                # print(f"Block {i+1}: Using {filters} filters (increasing)")
+            elif i < n_blocks // 2:
                 # First half: exponential increase
-                filters = min(base_filters * (2 ** i), 1024)
+                filters = min(base_filters * (4 ** i), 1024)   # 2** or 4**
+                # print(f"Block {i+1}: Using {filters} filters (increasing)")
+            elif i == n_blocks -1:
+                filters = 64
+                # print(f"Block {i+1}: Using {filters} filters (decreasing)")
             else:
                 # Second half: exponential decrease (mirror of first half)
                 mirror_index = n_blocks - i - 1
-                filters = min(base_filters * (2 ** mirror_index), 1024)
+                filters = min(base_filters * (4 ** mirror_index), 1024)
+                # print(f"Block {i+1}: Using {filters} filters (decreasing)")
             
             # Use existing SameShapeBlock
             block = SameShapeBlock(filters=filters, gen_l2=gen_l2)
@@ -4211,25 +4219,25 @@ def train_step_cnn_residual_jmmd(model_cnn, loader_H, loss_fn, optimizer, lower_
             
             # Residual regularization: Encourage small, meaningful corrections
             residual_reg = 0.001 * (tf.reduce_mean(tf.square(residual_src)) + 
-                                   tf.reduce_mean(tf.square(residual_tgt)))
+                                    tf.reduce_mean(tf.square(residual_tgt)))
             
             # Smoothness loss on corrected channels
             if temporal_weight != 0 or frequency_weight != 0:
                 smoothness_loss_src = compute_total_smoothness_loss(x_corrected_src, 
-                                                                  temporal_weight=temporal_weight, 
-                                                                  frequency_weight=frequency_weight)
+                                                                temporal_weight=temporal_weight, 
+                                                                frequency_weight=frequency_weight)
                 smoothness_loss_tgt = compute_total_smoothness_loss(x_corrected_tgt, 
-                                                                  temporal_weight=temporal_weight, 
-                                                                  frequency_weight=frequency_weight)
+                                                                temporal_weight=temporal_weight, 
+                                                                frequency_weight=frequency_weight)
                 smoothness_loss = (smoothness_loss_src + smoothness_loss_tgt) / 2
             else:
                 smoothness_loss = 0.0
             
             # Total loss (NO adversarial component)
             total_loss = (est_weight * est_loss + 
-                         domain_weight * jmmd_loss + 
-                         residual_reg +
-                         smoothness_loss)
+                        domain_weight * jmmd_loss + 
+                        residual_reg +
+                        smoothness_loss)
             
             # Add L2 regularization from model
             if model_cnn.losses:
@@ -4587,8 +4595,8 @@ def train_step_cnn_residual_source_only(model_cnn, loader_H, loss_fn, optimizer,
             # Smoothness loss on corrected source channels (optional)
             if temporal_weight != 0 or frequency_weight != 0:
                 smoothness_loss = compute_total_smoothness_loss(x_corrected_src, 
-                                                              temporal_weight=temporal_weight, 
-                                                              frequency_weight=frequency_weight)
+                                                            temporal_weight=temporal_weight, 
+                                                            frequency_weight=frequency_weight)
             else:
                 smoothness_loss = 0.0
             
@@ -4878,3 +4886,1119 @@ def val_step_cnn_residual_source_only(model_cnn, loader_H, loss_fn, lower_range,
     if return_H_gen:
         return H_sample, epoc_eval_return, H_gen
     return H_sample, epoc_eval_return
+
+# CORAL instead of JMMD
+class MemoryEfficientCORALLoss(keras.layers.Layer):
+    """
+    Memory-Efficient CORAL Loss with Hybrid Feature Reduction
+    Combines global pooling + dimension reduction for optimal performance/memory trade-off
+    """
+    def __init__(self, max_features=1024, use_global_pooling=True, 
+                 global_pooling_weight=0.7, dense_reduction_weight=0.3, **kwargs):
+        super(MemoryEfficientCORALLoss, self).__init__(**kwargs)
+        self.max_features = max_features
+        self.use_global_pooling = use_global_pooling
+        self.gp_weight = global_pooling_weight      # Weight for global pooling branch
+        self.dr_weight = dense_reduction_weight     # Weight for dense reduction branch
+        
+        print(f"MemoryEfficientCORALLoss initialized:")
+        print(f"  - Max features: {max_features}")
+        print(f"  - Global pooling: {use_global_pooling}")
+        print(f"  - GP weight: {global_pooling_weight}, DR weight: {dense_reduction_weight}")
+    
+    def reduce_feature_dims(self, features, target_dim=None):
+        """Reduce feature dimensions using random projection"""
+        if target_dim is None:
+            target_dim = self.max_features
+            
+        if features.shape[-1] > target_dim:
+            # Random projection matrix with proper scaling
+            proj_matrix = tf.random.normal([features.shape[-1], target_dim], 
+                                        stddev=1.0/tf.sqrt(float(target_dim)))
+            features = tf.matmul(features, proj_matrix)
+        return features
+    
+    def coral_loss(self, source_features, target_features):
+        """
+        Compute CORAL loss between source and target features
+        Same as your original implementation
+        """
+        # Compute covariance matrices
+        source_cov = self.compute_covariance(source_features)
+        target_cov = self.compute_covariance(target_features)
+        
+        # CORAL loss: Frobenius norm of covariance difference
+        loss = tf.reduce_sum(tf.square(source_cov - target_cov))
+        
+        # Normalize by feature dimension squared
+        d = tf.cast(source_features.shape[1], tf.float32)
+        loss = loss / (4.0 * d * d)
+        
+        return loss
+    
+    def compute_covariance(self, features):
+        """
+        Compute covariance matrix of features
+        Same as your original implementation
+        """
+        # Center the features (subtract mean)
+        features_centered = features - tf.reduce_mean(features, axis=0, keepdims=True)
+        
+        # Compute covariance matrix
+        n = tf.cast(tf.shape(features_centered)[0], tf.float32)
+        cov_matrix = tf.matmul(features_centered, features_centered, transpose_a=True) / (n - 1)
+        
+        return cov_matrix
+    
+    def hybrid_coral_loss(self, source_feat, target_feat):
+        """
+        Compute CORAL loss using hybrid approach: global pooling + dense reduction
+        """
+        total_coral_loss = 0.0
+        num_branches = 0
+        
+        # === Branch 1: Global Pooling (Channel Statistics) ===
+        if self.use_global_pooling and len(source_feat.shape) == 4:  # [B, H, W, C]
+            src_pooled = tf.reduce_mean(source_feat, axis=[1, 2])  # [B, C]
+            tgt_pooled = tf.reduce_mean(target_feat, axis=[1, 2])  # [B, C]
+            
+            # Further reduce dimensions if needed
+            if src_pooled.shape[-1] > self.max_features:
+                src_pooled = self.reduce_feature_dims(src_pooled, self.max_features)
+                tgt_pooled = self.reduce_feature_dims(tgt_pooled, self.max_features)
+            
+            coral_pooled = self.coral_loss(src_pooled, tgt_pooled)
+            total_coral_loss += self.gp_weight * coral_pooled
+            num_branches += 1
+            
+            print(f"    Global pooling branch: {source_feat.shape} → {src_pooled.shape}")
+        
+        # === Branch 2: Dense Reduction (Spatial Relationships) ===
+        if self.dr_weight > 0:
+            # Flatten all spatial and channel dimensions
+            src_flat = tf.reshape(source_feat, [tf.shape(source_feat)[0], -1])
+            tgt_flat = tf.reshape(target_feat, [tf.shape(target_feat)[0], -1])
+            
+            # Apply dimension reduction
+            if src_flat.shape[-1] > self.max_features:
+                src_reduced = self.reduce_feature_dims(src_flat, self.max_features)
+                tgt_reduced = self.reduce_feature_dims(tgt_flat, self.max_features)
+            else:
+                src_reduced, tgt_reduced = src_flat, tgt_flat
+            
+            coral_dense = self.coral_loss(src_reduced, tgt_reduced)
+            total_coral_loss += self.dr_weight * coral_dense
+            num_branches += 1
+            
+            print(f"    Dense reduction branch: {source_feat.shape} → {src_reduced.shape}")
+        
+        # Return weighted combination
+        return total_coral_loss if num_branches > 0 else 0.0
+    
+    def call(self, source_list, target_list):
+        """
+        Compute CORAL loss across multiple layers with hybrid feature reduction
+        
+        Args:
+            source_list: list of source features from different layers
+            target_list: list of target features from different layers
+        """
+        coral_loss_total = 0.0
+        
+        for i, (source_feat, target_feat) in enumerate(zip(source_list, target_list)):
+            print(f"  Processing layer {i+1}: {source_feat.shape}")
+            
+            # Use hybrid approach for each layer
+            layer_coral_loss = self.hybrid_coral_loss(source_feat, target_feat)
+            coral_loss_total += layer_coral_loss
+        
+        return coral_loss_total / len(source_list)  # Average across layers
+
+def train_step_wgan_gp_coral_residual(model, loader_H, loss_fn, optimizers, lower_range=-1, 
+                                    save_features=False, nsymb=14, weights=None, linear_interp=False):
+    """
+    WGAN-GP training step with CORAL domain adaptation using residual learning approach
+    Model predicts residual correction instead of direct channel estimation
+    
+    Args:
+        model: GAN model instance with generator and discriminator
+        loader_H: tuple of (loader_H_input_train_src, loader_H_true_train_src, 
+                        loader_H_input_train_tgt, loader_H_true_train_tgt)
+        loss_fn: tuple of loss functions (estimation_loss, bce_loss)
+        optimizers: tuple of (gen_optimizer, disc_optimizer)
+        lower_range: lower range for min-max scaling
+        save_features: bool, whether to save features for PAD computation
+        nsymb: number of symbols
+        weights: weight dictionary
+        linear_interp: linear interpolation flag
+    """
+    loader_H_input_train_src, loader_H_true_train_src, \
+        loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
+    loss_fn_est, loss_fn_bce = loss_fn[:2]  # Only need first two loss functions
+    gen_optimizer, disc_optimizer = optimizers[:2]  # No domain optimizer needed
+    
+    adv_weight = weights.get('adv_weight', 0.01)
+    temporal_weight = weights.get('temporal_weight', 0.0)
+    frequency_weight = weights.get('frequency_weight', 0.0)
+    est_weight = weights.get('est_weight', 1.0)
+    domain_weight = weights.get('domain_weight')
+    
+    # Initialize CORAL loss instead of JMMD
+    coral_loss_fn = MemoryEfficientCORALLoss()
+    
+    epoc_loss_g = 0.0
+    epoc_loss_d = 0.0
+    epoc_loss_est = 0.0
+    epoc_loss_est_tgt = 0.0
+    epoc_loss_coral = 0.0  # Track CORAL loss instead of JMMD
+    epoc_residual_norm = 0.0  # Track residual magnitude
+    N_train = 0
+    
+    if save_features==True and (domain_weight != 0):
+        features_h5_path_source = 'features_source.h5'
+        if os.path.exists(features_h5_path_source):
+            os.remove(features_h5_path_source)
+        features_h5_source = h5py.File(features_h5_path_source, 'w')
+        features_dataset_source = None
+
+        features_h5_path_target = 'features_target.h5'
+        if os.path.exists(features_h5_path_target):
+            os.remove(features_h5_path_target)   
+        features_h5_target = h5py.File(features_h5_path_target, 'w')
+        features_dataset_target = None
+    
+    for batch_idx in range(loader_H_true_train_src.total_batches):
+        # --- Get data (same as original) ---
+        x_src = loader_H_input_train_src.next_batch()
+        y_src = loader_H_true_train_src.next_batch()
+        x_tgt = loader_H_input_train_tgt.next_batch()
+        y_tgt = loader_H_true_train_tgt.next_batch()
+        N_train += x_src.shape[0]
+
+        # Preprocess (source) - same as original
+        x_src = complx2real(x_src)
+        y_src = complx2real(y_src)
+        x_src = np.transpose(x_src, (0, 2, 3, 1))
+        y_src = np.transpose(y_src, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = minmaxScaler(y_src, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+
+        # Preprocess (target) - same as original
+        x_tgt = complx2real(x_tgt)
+        y_tgt = complx2real(y_tgt)
+        x_tgt = np.transpose(x_tgt, (0, 2, 3, 1))
+        y_tgt = np.transpose(y_tgt, (0, 2, 3, 1))
+        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_tgt, _, _ = minmaxScaler(y_tgt, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+
+        # === 1. Train Discriminator (WGAN-GP) with RESIDUAL learning ===
+        with tf.GradientTape() as tape_d:
+            # RESIDUAL LEARNING: Generate residual correction
+            residual_src, _ = model.generator(x_scaled_src, training=True)
+            x_fake_src = x_scaled_src + residual_src  # ← KEY CHANGE: Add residual to input
+            
+            d_real = model.discriminator(y_scaled_src, training=True)
+            d_fake = model.discriminator(x_fake_src, training=True)  # ← Discriminate corrected channels
+            
+            # WGAN-GP gradient penalty
+            gp = gradient_penalty(model.discriminator, y_scaled_src, x_fake_src, batch_size=x_scaled_src.shape[0])
+            lambda_gp = 10.0
+
+            # WGAN-GP discriminator loss
+            d_loss = tf.reduce_mean(d_fake) - tf.reduce_mean(d_real) + lambda_gp * gp
+            
+            # Add L2 regularization loss from discriminator
+            if model.discriminator.losses:
+                d_loss += tf.add_n(model.discriminator.losses)
+                
+        grads_d = tape_d.gradient(d_loss, model.discriminator.trainable_variables)
+        disc_optimizer.apply_gradients(zip(grads_d, model.discriminator.trainable_variables))
+        epoc_loss_d += d_loss.numpy() * x_src.shape[0]
+
+        # === 2. Train Generator with RESIDUAL learning + CORAL ===
+        with tf.GradientTape() as tape_g:
+            # RESIDUAL LEARNING: Generate residual corrections with features
+            residual_src, features_src = model.generator(x_scaled_src, training=True)
+            x_fake_src = x_scaled_src + residual_src  # ← Apply residual correction
+            
+            residual_tgt, features_tgt = model.generator(x_scaled_tgt, training=True)
+            x_fake_tgt = x_scaled_tgt + residual_tgt  # ← Apply residual correction
+            
+            d_fake_src = model.discriminator(x_fake_src, training=False)
+            
+            # Generator losses on CORRECTED channels
+            g_adv_loss = -tf.reduce_mean(d_fake_src)  # WGAN-GP adversarial loss
+            g_est_loss = loss_fn_est(y_scaled_src, x_fake_src)          # ← Loss on corrected source
+            g_est_loss_tgt = loss_fn_est(y_scaled_tgt, x_fake_tgt)      # ← Loss on corrected target (monitoring)
+            
+            # CORAL loss between residual features (encourages similar correction patterns)
+            coral_loss = coral_loss_fn(features_src, features_tgt)
+            
+            # RESIDUAL REGULARIZATION: Encourage small, meaningful corrections
+            residual_reg_src = tf.reduce_mean(tf.square(residual_src))
+            residual_reg_tgt = tf.reduce_mean(tf.square(residual_tgt))
+            residual_reg = (residual_reg_src + residual_reg_tgt) / 2
+            residual_penalty = 0.001 * residual_reg  # Small penalty for large residuals
+            
+            # ADD TEMPORAL SMOOTHNESS LOSS on corrected channels
+            if temporal_weight != 0 or frequency_weight != 0:
+                smoothness_loss_src = compute_total_smoothness_loss(x_fake_src, temporal_weight=temporal_weight, frequency_weight=frequency_weight)
+                smoothness_loss_tgt = compute_total_smoothness_loss(x_fake_tgt, temporal_weight=temporal_weight, frequency_weight=frequency_weight)
+                smoothness_loss = (smoothness_loss_src + smoothness_loss_tgt) / 2
+            else:
+                smoothness_loss = 0.0
+        
+            # Total generator loss with residual regularization
+            g_loss = (est_weight * g_est_loss + 
+                    adv_weight * g_adv_loss + 
+                    domain_weight * coral_loss +   # ← CORAL instead of JMMD
+                    residual_penalty +              # ← Encourage small residuals
+                    smoothness_loss)
+            
+            # Add L2 regularization
+            if model.generator.losses:
+                g_loss += tf.add_n(model.generator.losses)
+        
+        # === 3. Save features if required (same as original) ===
+        if save_features and (domain_weight != 0):
+            # Save residual features (not corrected channels)
+            features_np_source = features_src[-1].numpy()
+            if features_dataset_source is None:
+                features_dataset_source = features_h5_source.create_dataset(
+                    'features',
+                    data=features_np_source,
+                    maxshape=(None,) + features_np_source.shape[1:],
+                    chunks=True
+                )
+            else:
+                features_dataset_source.resize(features_dataset_source.shape[0] + features_np_source.shape[0], axis=0)
+                features_dataset_source[-features_np_source.shape[0]:] = features_np_source
+                
+            features_np_target = features_tgt[-1].numpy()
+            if features_dataset_target is None:
+                features_dataset_target = features_h5_target.create_dataset(
+                    'features',
+                    data=features_np_target,
+                    maxshape=(None,) + features_np_target.shape[1:],
+                    chunks=True
+                )
+            else:
+                features_dataset_target.resize(features_dataset_target.shape[0] + features_np_target.shape[0], axis=0)
+                features_dataset_target[-features_np_target.shape[0]:] = features_np_target
+                
+        grads_g = tape_g.gradient(g_loss, model.generator.trainable_variables)
+        gen_optimizer.apply_gradients(zip(grads_g, model.generator.trainable_variables))
+        
+        epoc_loss_g += g_loss.numpy() * x_src.shape[0]
+        epoc_loss_est += g_est_loss.numpy() * x_src.shape[0]
+        epoc_loss_est_tgt += g_est_loss_tgt.numpy() * x_tgt.shape[0]
+        epoc_loss_coral += coral_loss.numpy() * x_src.shape[0]  # Track CORAL instead of JMMD
+        epoc_residual_norm += residual_reg.numpy() * x_src.shape[0]  # Track residual magnitude
+        
+    # end batch loop
+    if save_features and (domain_weight != 0):    
+        features_h5_source.close()
+        features_h5_target.close()
+    
+    # Average losses
+    avg_loss_g = epoc_loss_g / N_train
+    avg_loss_d = epoc_loss_d / N_train
+    avg_loss_est = epoc_loss_est / N_train
+    avg_loss_coral = epoc_loss_coral / N_train  # CORAL loss average
+    avg_loss_est_tgt = epoc_loss_est_tgt / N_train
+    avg_residual_norm = epoc_residual_norm / N_train  # Average residual magnitude
+    
+    # Print residual statistics for monitoring
+    print(f"    Residual norm (avg): {avg_residual_norm:.6f}")
+    
+    # Return compatible output structure (same as JMMD residual version)
+    return train_step_Output(
+        avg_epoc_loss_est=avg_loss_est,
+        avg_epoc_loss_domain=avg_loss_coral,  # CORAL loss on residual features
+        avg_epoc_loss=avg_loss_g,
+        avg_epoc_loss_est_target=avg_loss_est_tgt,
+        features_source=features_src[-1] if features_src else None,
+        film_features_source=features_src[-1] if features_src else None,
+        avg_epoc_loss_d=avg_loss_d
+    )
+
+def val_step_wgan_gp_coral_residual(model, loader_H, loss_fn, lower_range, nsymb=14, weights=None, 
+                                    linear_interp=False, return_H_gen=False):
+    """
+    Validation step for WGAN-GP with CORAL using residual learning
+    """
+    adv_weight = weights.get('adv_weight', 0.01)
+    temporal_weight = weights.get('temporal_weight', 0.0)
+    frequency_weight = weights.get('frequency_weight', 0.0)
+    est_weight = weights.get('est_weight', 1.0)
+    domain_weight = weights.get('domain_weight')
+    
+    loader_H_input_val_source, loader_H_true_val_source, loader_H_input_val_target, loader_H_true_val_target = loader_H
+    loss_fn_est, loss_fn_bce = loss_fn[:2]
+    
+    # Initialize CORAL loss
+    coral_loss_fn = MemoryEfficientCORALLoss()
+    
+    N_val_source = 0
+    N_val_target = 0
+    epoc_loss_est_source = 0.0
+    epoc_loss_est_target = 0.0
+    epoc_nmse_val_source = 0.0
+    epoc_nmse_val_target = 0.0
+    epoc_gan_disc_loss = 0.0
+    epoc_coral_loss = 0.0  # Track CORAL instead of JMMD
+    epoc_smoothness_loss = 0.0
+    epoc_residual_norm = 0.0  # Track residual magnitude during validation
+    H_sample = []
+    
+    if return_H_gen:
+        all_H_gen_src = []
+        all_H_gen_tgt = []
+
+    for idx in range(loader_H_true_val_source.total_batches):
+        # --- Get data (same as original) ---
+        x_src = loader_H_input_val_source.next_batch()
+        y_src = loader_H_true_val_source.next_batch()
+        x_tgt = loader_H_input_val_target.next_batch()
+        y_tgt = loader_H_true_val_target.next_batch()
+        N_val_source += x_src.shape[0]
+        N_val_target += x_tgt.shape[0]
+
+        # Preprocess (same as original)
+        x_src_real = complx2real(x_src)
+        y_src_real = complx2real(y_src)
+        x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
+        y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = minmaxScaler(y_src_real, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+
+        x_tgt_real = complx2real(x_tgt)
+        y_tgt_real = complx2real(y_tgt)
+        x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
+        y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
+        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_tgt, _, _ = minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+
+        # === RESIDUAL LEARNING: Source domain prediction ===
+        residual_src, features_src = model.generator(x_scaled_src, training=False, return_features=True)
+        preds_src = x_scaled_src + residual_src  # ← Apply residual correction
+        preds_src = preds_src.numpy() if hasattr(preds_src, 'numpy') else preds_src
+        preds_src_descaled = deMinMax(preds_src, x_min_src, x_max_src, lower_range=lower_range)
+        batch_est_loss_source = loss_fn_est(y_scaled_src, preds_src).numpy()
+        epoc_loss_est_source += batch_est_loss_source * x_src.shape[0]
+        mse_val_source = np.mean((preds_src_descaled - y_src_real) ** 2, axis=(1, 2, 3))
+        power_source = np.mean(y_src_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_source += np.mean(mse_val_source / (power_source + 1e-30)) * x_src.shape[0]
+
+        # === RESIDUAL LEARNING: Target domain prediction ===
+        residual_tgt, features_tgt = model.generator(x_scaled_tgt, training=False, return_features=True)
+        preds_tgt = x_scaled_tgt + residual_tgt  # ← Apply residual correction
+        preds_tgt = preds_tgt.numpy() if hasattr(preds_tgt, 'numpy') else preds_tgt
+        preds_tgt_descaled = deMinMax(preds_tgt, x_min_tgt, x_max_tgt, lower_range=lower_range)
+        batch_est_loss_target = loss_fn_est(y_scaled_tgt, preds_tgt).numpy()
+        epoc_loss_est_target += batch_est_loss_target * x_tgt.shape[0]
+        mse_val_target = np.mean((preds_tgt_descaled - y_tgt_real) ** 2, axis=(1, 2, 3))
+        power_target = np.mean(y_tgt_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_target += np.mean(mse_val_target / (power_target + 1e-30)) * x_tgt.shape[0]
+
+        # Track residual magnitudes during validation
+        residual_src_norm = tf.reduce_mean(tf.square(residual_src)).numpy()
+        residual_tgt_norm = tf.reduce_mean(tf.square(residual_tgt)).numpy()
+        epoc_residual_norm += (residual_src_norm + residual_tgt_norm) / 2 * x_src.shape[0]
+
+        # === WGAN Discriminator Scores (on corrected channels) ===
+        d_real_src = model.discriminator(y_scaled_src, training=False)
+        d_fake_src = model.discriminator(preds_src, training=False)  # ← Discriminate corrected channels
+        gp_src = gradient_penalty(model.discriminator, y_scaled_src, preds_src, batch_size=x_scaled_src.shape[0])
+        lambda_gp = 10.0
+        
+        d_loss_src = tf.reduce_mean(d_fake_src) - tf.reduce_mean(d_real_src) + lambda_gp * gp_src
+        epoc_gan_disc_loss += d_loss_src.numpy() * x_src.shape[0]
+
+        # === CORAL Loss (on residual features) ===
+        if domain_weight > 0:
+            coral_loss = coral_loss_fn(features_src, features_tgt)
+            epoc_coral_loss += coral_loss.numpy() * x_src.shape[0]
+        
+        # === Smoothness loss (on corrected channels) ===
+        if temporal_weight != 0 or frequency_weight != 0:
+            preds_src_tensor = tf.convert_to_tensor(preds_src) if not tf.is_tensor(preds_src) else preds_src
+            preds_tgt_tensor = tf.convert_to_tensor(preds_tgt) if not tf.is_tensor(preds_tgt) else preds_tgt
+            
+            smoothness_loss_src = compute_total_smoothness_loss(
+                preds_src_tensor, temporal_weight=temporal_weight, frequency_weight=frequency_weight
+            )
+            smoothness_loss_tgt = compute_total_smoothness_loss(
+                preds_tgt_tensor, temporal_weight=temporal_weight, frequency_weight=frequency_weight
+            )
+            batch_smoothness_loss = (smoothness_loss_src + smoothness_loss_tgt) / 2
+            epoc_smoothness_loss += batch_smoothness_loss.numpy() * x_src.shape[0]
+
+        # === Save H samples (same structure as original) ===
+        if idx == 0:
+            n_samples = min(3, x_src_real.shape[0], x_tgt_real.shape[0])
+            # Source samples
+            H_true_sample = y_src_real[:n_samples].copy()
+            H_input_sample = x_src_real[:n_samples].copy()
+            if hasattr(preds_src_descaled, 'numpy'):
+                H_est_sample = preds_src_descaled[:n_samples].numpy().copy()
+            else:
+                H_est_sample = preds_src_descaled[:n_samples].copy()
+            
+            mse_sample_source = np.mean((H_est_sample - H_true_sample) ** 2, axis=(1, 2, 3))
+            power_sample_source = np.mean(H_true_sample ** 2, axis=(1, 2, 3))
+            nmse_est_source = mse_sample_source / (power_sample_source + 1e-30)
+            mse_input_source = np.mean((H_input_sample - H_true_sample) ** 2, axis=(1, 2, 3))
+            nmse_input_source = mse_input_source / (power_sample_source + 1e-30)
+            
+            # Target samples
+            H_true_sample_target = y_tgt_real[:n_samples].copy()
+            H_input_sample_target = x_tgt_real[:n_samples].copy()
+            if hasattr(preds_tgt_descaled, 'numpy'):
+                H_est_sample_target = preds_tgt_descaled[:n_samples].numpy().copy()
+            else:
+                H_est_sample_target = preds_tgt_descaled[:n_samples].copy()
+            
+            mse_sample_target = np.mean((H_est_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            power_sample_target = np.mean(H_true_sample_target ** 2, axis=(1, 2, 3))
+            nmse_est_target = mse_sample_target / (power_sample_target + 1e-30)
+            mse_input_target = np.mean((H_input_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            nmse_input_target = mse_input_target / (power_sample_target + 1e-30)
+            
+            H_sample = [H_true_sample, H_input_sample, H_est_sample, nmse_input_source, nmse_est_source,
+                        H_true_sample_target, H_input_sample_target, H_est_sample_target, nmse_input_target, nmse_est_target]
+            
+        if return_H_gen:
+            # Convert to numpy if needed and append to lists
+            H_gen_src_batch = preds_src_descaled.numpy().copy() if hasattr(preds_src_descaled, 'numpy') else preds_src_descaled.copy()
+            H_gen_tgt_batch = preds_tgt_descaled.numpy().copy() if hasattr(preds_tgt_descaled, 'numpy') else preds_tgt_descaled.copy()
+            
+            all_H_gen_src.append(H_gen_src_batch)
+            all_H_gen_tgt.append(H_gen_tgt_batch)
+    
+    if return_H_gen:
+        H_gen_src_all = np.concatenate(all_H_gen_src, axis=0)
+        H_gen_tgt_all = np.concatenate(all_H_gen_tgt, axis=0)
+        H_gen = {
+            'H_gen_src': H_gen_src_all,
+            'H_gen_tgt': H_gen_tgt_all
+        }
+
+    # Calculate averages (same as original)
+    N_val = N_val_source + N_val_target
+    avg_loss_est_source = epoc_loss_est_source / N_val_source
+    avg_loss_est_target = epoc_loss_est_target / N_val_target
+    avg_loss_est = (avg_loss_est_source + avg_loss_est_target) / 2
+    avg_nmse_source = epoc_nmse_val_source / N_val_source
+    avg_nmse_target = epoc_nmse_val_target / N_val_target
+    avg_nmse = (avg_nmse_source + avg_nmse_target) / 2
+    avg_gan_disc_loss = epoc_gan_disc_loss / N_val_source 
+    avg_coral_loss = epoc_coral_loss / N_val_source if epoc_coral_loss > 0 else 0.0  # CORAL average
+    avg_smoothness_loss = epoc_smoothness_loss / N_val_source if epoc_smoothness_loss > 0 else 0.0
+    avg_residual_norm = epoc_residual_norm / N_val_source
+    
+    # Print residual statistics
+    print(f"    Validation residual norm (avg): {avg_residual_norm:.6f}")
+    
+    # Same domain accuracy placeholders as original
+    avg_domain_acc_source = 0.5
+    avg_domain_acc_target = 0.5
+    avg_domain_acc = 0.5
+
+    # Total loss (same structure as original)
+    avg_total_loss = est_weight * avg_loss_est + adv_weight * avg_gan_disc_loss \
+                     + domain_weight * avg_coral_loss + avg_smoothness_loss
+
+    # Return same structure as original, replace JMMD with CORAL
+    epoc_eval_return = {
+        'avg_total_loss': avg_total_loss,
+        'avg_loss_est_source': avg_loss_est_source,
+        'avg_loss_est_target': avg_loss_est_target, 
+        'avg_loss_est': avg_loss_est,
+        'avg_gan_disc_loss': avg_gan_disc_loss,
+        'avg_jmmd_loss': avg_coral_loss,  # ← Use CORAL loss for compatibility
+        'avg_nmse_source': avg_nmse_source,
+        'avg_nmse_target': avg_nmse_target,
+        'avg_nmse': avg_nmse,
+        'avg_domain_acc_source': avg_domain_acc_source,
+        'avg_domain_acc_target': avg_domain_acc_target,
+        'avg_domain_acc': avg_domain_acc,
+        'avg_smoothness_loss': avg_smoothness_loss
+    }
+
+    if return_H_gen:
+        return H_sample, epoc_eval_return, H_gen
+    return H_sample, epoc_eval_return
+
+def train_step_cnn_residual_coral(model_cnn, loader_H, loss_fn, optimizer, lower_range=-1, 
+                                save_features=False, nsymb=14, weights=None, linear_interp=False):
+    """
+    CNN-only residual training step with CORAL domain adaptation (no discriminator)
+    Model predicts residual correction instead of direct channel estimation
+    
+    Args:
+        model_cnn: CNN model (CNNGenerator instance, not GAN wrapper)
+        loader_H: tuple of (loader_H_input_train_src, loader_H_true_train_src, 
+                        loader_H_input_train_tgt, loader_H_true_train_tgt)
+        loss_fn: tuple of loss functions (estimation_loss, bce_loss) - only first one used
+        optimizer: single optimizer for CNN (not tuple like GAN)
+        lower_range: lower range for min-max scaling
+        save_features: bool, whether to save features for PAD computation
+        nsymb: number of symbols
+        weights: weight dictionary
+        linear_interp: linear interpolation flag
+    """
+    loader_H_input_train_src, loader_H_true_train_src, \
+        loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
+    loss_fn_est = loss_fn[0]  # Only need estimation loss (no BCE for discriminator)
+    
+    est_weight = weights.get('est_weight', 1.0)
+    domain_weight = weights.get('domain_weight', 1.0)
+    temporal_weight = weights.get('temporal_weight', 0.0)
+    frequency_weight = weights.get('frequency_weight', 0.0)
+    
+    # Initialize CORAL for domain adaptation
+    coral_loss_fn = MemoryEfficientCORALLoss()
+    
+    epoc_loss_total = 0.0
+    epoc_loss_est = 0.0
+    epoc_loss_coral = 0.0
+    epoc_residual_norm = 0.0  # Track residual magnitude
+    N_train = 0
+    
+    if save_features==True and (domain_weight != 0):
+        features_h5_path_source = 'features_source.h5'
+        if os.path.exists(features_h5_path_source):
+            os.remove(features_h5_path_source)
+        features_h5_source = h5py.File(features_h5_path_source, 'w')
+        features_dataset_source = None
+
+        features_h5_path_target = 'features_target.h5'
+        if os.path.exists(features_h5_path_target):
+            os.remove(features_h5_path_target)   
+        features_h5_target = h5py.File(features_h5_target, 'w')
+        features_dataset_target = None
+    
+    for batch_idx in range(loader_H_true_train_src.total_batches):
+        # Get and preprocess data (same as JMMD version)
+        x_src = loader_H_input_train_src.next_batch()
+        y_src = loader_H_true_train_src.next_batch()
+        x_tgt = loader_H_input_train_tgt.next_batch()
+        y_tgt = loader_H_true_train_tgt.next_batch()
+        N_train += x_src.shape[0]
+
+        # Preprocessing (same as original)
+        x_src = complx2real(x_src)
+        y_src = complx2real(y_src)
+        x_src = np.transpose(x_src, (0, 2, 3, 1))
+        y_src = np.transpose(y_src, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = minmaxScaler(y_src, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+
+        x_tgt = complx2real(x_tgt)
+        y_tgt = complx2real(y_tgt)
+        x_tgt = np.transpose(x_tgt, (0, 2, 3, 1))
+        y_tgt = np.transpose(y_tgt, (0, 2, 3, 1))
+        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_tgt, _, _ = minmaxScaler(y_tgt, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+        
+        # === Train CNN with RESIDUAL learning + CORAL ===
+        with tf.GradientTape() as tape:
+            # RESIDUAL LEARNING: Predict corrections
+            residual_src, features_src = model_cnn(x_scaled_src, training=True, return_features=True)
+            x_corrected_src = x_scaled_src + residual_src  # Apply residual correction
+            
+            residual_tgt, features_tgt = model_cnn(x_scaled_tgt, training=True, return_features=True)
+            x_corrected_tgt = x_scaled_tgt + residual_tgt  # Apply residual correction
+            
+            # Estimation loss: Corrected channels should match perfect
+            est_loss = loss_fn_est(y_scaled_src, x_corrected_src)
+            
+            # Domain adaptation: CORAL loss on residual features
+            coral_loss = coral_loss_fn(features_src, features_tgt)
+            
+            # Residual regularization: Encourage small, meaningful corrections
+            residual_reg = 0.001 * (tf.reduce_mean(tf.square(residual_src)) + 
+                                    tf.reduce_mean(tf.square(residual_tgt)))
+            
+            # Smoothness loss on corrected channels
+            if temporal_weight != 0 or frequency_weight != 0:
+                smoothness_loss_src = compute_total_smoothness_loss(x_corrected_src, 
+                                                                temporal_weight=temporal_weight, 
+                                                                frequency_weight=frequency_weight)
+                smoothness_loss_tgt = compute_total_smoothness_loss(x_corrected_tgt, 
+                                                                temporal_weight=temporal_weight, 
+                                                                frequency_weight=frequency_weight)
+                smoothness_loss = (smoothness_loss_src + smoothness_loss_tgt) / 2
+            else:
+                smoothness_loss = 0.0
+            
+            # Total loss (NO adversarial component)
+            total_loss = (est_weight * est_loss + 
+                        domain_weight * coral_loss +  # ← CORAL instead of JMMD
+                        residual_reg +
+                        smoothness_loss)
+            
+            # Add L2 regularization from model
+            if model_cnn.losses:
+                total_loss += tf.add_n(model_cnn.losses)
+        
+        # === Save features if required ===
+        if save_features and (domain_weight != 0):
+            # Save residual features
+            features_np_source = features_src[-1].numpy()
+            if features_dataset_source is None:
+                features_dataset_source = features_h5_source.create_dataset(
+                    'features',
+                    data=features_np_source,
+                    maxshape=(None,) + features_np_source.shape[1:],
+                    chunks=True
+                )
+            else:
+                features_dataset_source.resize(features_dataset_source.shape[0] + features_np_source.shape[0], axis=0)
+                features_dataset_source[-features_np_source.shape[0]:] = features_np_source
+                
+            features_np_target = features_tgt[-1].numpy()
+            if features_dataset_target is None:
+                features_dataset_target = features_h5_target.create_dataset(
+                    'features',
+                    data=features_np_target,
+                    maxshape=(None,) + features_np_target.shape[1:],
+                    chunks=True
+                )
+            else:
+                features_dataset_target.resize(features_dataset_target.shape[0] + features_np_target.shape[0], axis=0)
+                features_dataset_target[-features_np_target.shape[0]:] = features_np_target
+        
+        # Single optimizer update (no discriminator)
+        grads = tape.gradient(total_loss, model_cnn.trainable_variables)
+        optimizer.apply_gradients(zip(grads, model_cnn.trainable_variables))
+        
+        # Track metrics
+        epoc_loss_total += total_loss.numpy() * x_src.shape[0]
+        epoc_loss_est += est_loss.numpy() * x_src.shape[0]
+        epoc_loss_coral += coral_loss.numpy() * x_src.shape[0]
+        epoc_residual_norm += tf.reduce_mean(tf.abs(residual_src)).numpy() * x_src.shape[0]
+    
+    # end batch loop
+    if save_features and (domain_weight != 0):    
+        features_h5_source.close()
+        features_h5_target.close()
+    
+    # Calculate averages
+    avg_loss_total = epoc_loss_total / N_train
+    avg_loss_est = epoc_loss_est / N_train
+    avg_loss_coral = epoc_loss_coral / N_train
+    avg_residual_norm = epoc_residual_norm / N_train
+    
+    # Print residual statistics
+    print(f"    Residual norm (avg): {avg_residual_norm:.6f}")
+    
+    # Return compatible structure
+    return train_step_Output(
+        avg_epoc_loss_est=avg_loss_est,
+        avg_epoc_loss_domain=avg_loss_coral,  # CORAL loss instead of JMMD
+        avg_epoc_loss=avg_loss_total,
+        avg_epoc_loss_est_target=0.0,  # Can't calculate without target labels
+        features_source=features_src[-1] if features_src else None,
+        film_features_source=features_src[-1] if features_src else None,
+        avg_epoc_loss_d=0.0  # No discriminator loss
+    )
+    
+def val_step_cnn_residual_coral(model_cnn, loader_H, loss_fn, lower_range, nsymb=14, weights=None, 
+                                linear_interp=False, return_H_gen=False):
+    """
+    Validation step for CNN-only residual learning with CORAL (no discriminator)
+    
+    Args:
+        model_cnn: CNN model (CNNGenerator instance, not GAN wrapper)
+        loader_H: tuple of validation loaders
+        loss_fn: tuple of loss functions (only first one used)
+        lower_range: lower range for min-max scaling
+        nsymb: number of symbols
+        weights: weight dictionary
+        linear_interp: linear interpolation flag
+        return_H_gen: whether to return generated H matrices
+    """
+    loader_H_input_val_source, loader_H_true_val_source, loader_H_input_val_target, loader_H_true_val_target = loader_H
+    loss_fn_est = loss_fn[0]  # Only need estimation loss
+    
+    est_weight = weights.get('est_weight', 1.0)
+    domain_weight = weights.get('domain_weight', 1.0)
+    temporal_weight = weights.get('temporal_weight', 0.0)
+    frequency_weight = weights.get('frequency_weight', 0.0)
+    
+    # Initialize CORAL loss
+    coral_loss_fn = MemoryEfficientCORALLoss()
+    
+    N_val_source = 0
+    N_val_target = 0
+    epoc_loss_est_source = 0.0
+    epoc_loss_est_target = 0.0
+    epoc_nmse_val_source = 0.0
+    epoc_nmse_val_target = 0.0
+    epoc_coral_loss = 0.0
+    epoc_smoothness_loss = 0.0
+    epoc_residual_norm = 0.0  # Track residual magnitude during validation
+    H_sample = []
+    
+    if return_H_gen:
+        all_H_gen_src = []
+        all_H_gen_tgt = []
+
+    for idx in range(loader_H_true_val_source.total_batches):
+        # Get and preprocess data (same as JMMD version)
+        x_src = loader_H_input_val_source.next_batch()
+        y_src = loader_H_true_val_source.next_batch()
+        x_tgt = loader_H_input_val_target.next_batch()
+        y_tgt = loader_H_true_val_target.next_batch()
+        N_val_source += x_src.shape[0]
+        N_val_target += x_tgt.shape[0]
+
+        # Preprocessing (same as original)
+        x_src_real = complx2real(x_src)
+        y_src_real = complx2real(y_src)
+        x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
+        y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = minmaxScaler(y_src_real, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+
+        x_tgt_real = complx2real(x_tgt)
+        y_tgt_real = complx2real(y_tgt)
+        x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
+        y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
+        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_tgt, _, _ = minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+
+        # === RESIDUAL LEARNING: Source domain prediction ===
+        residual_src, features_src = model_cnn(x_scaled_src, training=False, return_features=True)
+        preds_src = x_scaled_src + residual_src  # Apply residual correction
+        
+        # Safe tensor conversion
+        if hasattr(preds_src, 'numpy'):
+            preds_src_numpy = preds_src.numpy()
+        else:
+            preds_src_numpy = preds_src
+        
+        preds_src_descaled = deMinMax(preds_src_numpy, x_min_src, x_max_src, lower_range=lower_range)
+        batch_est_loss_source = loss_fn_est(y_scaled_src, preds_src).numpy()
+        epoc_loss_est_source += batch_est_loss_source * x_src.shape[0]
+        mse_val_source = np.mean((preds_src_descaled - y_src_real) ** 2, axis=(1, 2, 3))
+        power_source = np.mean(y_src_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_source += np.mean(mse_val_source / (power_source + 1e-30)) * x_src.shape[0]
+
+        # === RESIDUAL LEARNING: Target domain prediction ===
+        residual_tgt, features_tgt = model_cnn(x_scaled_tgt, training=False, return_features=True)
+        preds_tgt = x_scaled_tgt + residual_tgt  # Apply residual correction
+        
+        # Safe tensor conversion
+        if hasattr(preds_tgt, 'numpy'):
+            preds_tgt_numpy = preds_tgt.numpy()
+        else:
+            preds_tgt_numpy = preds_tgt
+            
+        preds_tgt_descaled = deMinMax(preds_tgt_numpy, x_min_tgt, x_max_tgt, lower_range=lower_range)
+        batch_est_loss_target = loss_fn_est(y_scaled_tgt, preds_tgt).numpy()
+        epoc_loss_est_target += batch_est_loss_target * x_tgt.shape[0]
+        mse_val_target = np.mean((preds_tgt_descaled - y_tgt_real) ** 2, axis=(1, 2, 3))
+        power_target = np.mean(y_tgt_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_target += np.mean(mse_val_target / (power_target + 1e-30)) * x_tgt.shape[0]
+
+        # Track residual magnitudes during validation
+        residual_src_norm = tf.reduce_mean(tf.square(residual_src)).numpy()
+        residual_tgt_norm = tf.reduce_mean(tf.square(residual_tgt)).numpy()
+        epoc_residual_norm += (residual_src_norm + residual_tgt_norm) / 2 * x_src.shape[0]
+
+        # === CORAL Loss (on residual features) ===
+        if domain_weight > 0:
+            coral_loss = coral_loss_fn(features_src, features_tgt)
+            epoc_coral_loss += coral_loss.numpy() * x_src.shape[0]
+        
+        # === Smoothness loss (on corrected channels) ===
+        if temporal_weight != 0 or frequency_weight != 0:
+            preds_src_tensor = tf.convert_to_tensor(preds_src_numpy) if not tf.is_tensor(preds_src) else preds_src
+            preds_tgt_tensor = tf.convert_to_tensor(preds_tgt_numpy) if not tf.is_tensor(preds_tgt) else preds_tgt
+            
+            smoothness_loss_src = compute_total_smoothness_loss(
+                preds_src_tensor, temporal_weight=temporal_weight, frequency_weight=frequency_weight
+            )
+            smoothness_loss_tgt = compute_total_smoothness_loss(
+                preds_tgt_tensor, temporal_weight=temporal_weight, frequency_weight=frequency_weight
+            )
+            batch_smoothness_loss = (smoothness_loss_src + smoothness_loss_tgt) / 2
+            epoc_smoothness_loss += batch_smoothness_loss.numpy() * x_src.shape[0]
+
+        # === Save H samples ===
+        if idx == 0:
+            n_samples = min(3, x_src_real.shape[0], x_tgt_real.shape[0])
+            # Source samples
+            H_true_sample = y_src_real[:n_samples].copy()
+            H_input_sample = x_src_real[:n_samples].copy()
+            if hasattr(preds_src_descaled, 'numpy'):
+                H_est_sample = preds_src_descaled[:n_samples].numpy().copy()
+            else:
+                H_est_sample = preds_src_descaled[:n_samples].copy()
+            
+            mse_sample_source = np.mean((H_est_sample - H_true_sample) ** 2, axis=(1, 2, 3))
+            power_sample_source = np.mean(H_true_sample ** 2, axis=(1, 2, 3))
+            nmse_est_source = mse_sample_source / (power_sample_source + 1e-30)
+            mse_input_source = np.mean((H_input_sample - H_true_sample) ** 2, axis=(1, 2, 3))
+            nmse_input_source = mse_input_source / (power_sample_source + 1e-30)
+            
+            # Target samples
+            H_true_sample_target = y_tgt_real[:n_samples].copy()
+            H_input_sample_target = x_tgt_real[:n_samples].copy()
+            if hasattr(preds_tgt_descaled, 'numpy'):
+                H_est_sample_target = preds_tgt_descaled[:n_samples].numpy().copy()
+            else:
+                H_est_sample_target = preds_tgt_descaled[:n_samples].copy()
+            
+            mse_sample_target = np.mean((H_est_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            power_sample_target = np.mean(H_true_sample_target ** 2, axis=(1, 2, 3))
+            nmse_est_target = mse_sample_target / (power_sample_target + 1e-30)
+            mse_input_target = np.mean((H_input_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            nmse_input_target = mse_input_target / (power_sample_target + 1e-30)
+            
+            H_sample = [H_true_sample, H_input_sample, H_est_sample, nmse_input_source, nmse_est_source,
+                        H_true_sample_target, H_input_sample_target, H_est_sample_target, nmse_input_target, nmse_est_target]
+            
+        if return_H_gen:
+            # Convert to numpy if needed and append to lists
+            H_gen_src_batch = preds_src_descaled.numpy().copy() if hasattr(preds_src_descaled, 'numpy') else preds_src_descaled.copy()
+            H_gen_tgt_batch = preds_tgt_descaled.numpy().copy() if hasattr(preds_tgt_descaled, 'numpy') else preds_tgt_descaled.copy()
+            
+            all_H_gen_src.append(H_gen_src_batch)
+            all_H_gen_tgt.append(H_gen_tgt_batch)
+    
+    if return_H_gen:
+        H_gen_src_all = np.concatenate(all_H_gen_src, axis=0)
+        H_gen_tgt_all = np.concatenate(all_H_gen_tgt, axis=0)
+        H_gen = {
+            'H_gen_src': H_gen_src_all,
+            'H_gen_tgt': H_gen_tgt_all
+        }
+
+    # Calculate averages
+    avg_loss_est_source = epoc_loss_est_source / N_val_source
+    avg_loss_est_target = epoc_loss_est_target / N_val_target
+    avg_loss_est = (avg_loss_est_source + avg_loss_est_target) / 2
+    avg_nmse_source = epoc_nmse_val_source / N_val_source
+    avg_nmse_target = epoc_nmse_val_target / N_val_target
+    avg_nmse = (avg_nmse_source + avg_nmse_target) / 2
+    avg_coral_loss = epoc_coral_loss / N_val_source if epoc_coral_loss > 0 else 0.0
+    avg_smoothness_loss = epoc_smoothness_loss / N_val_source if epoc_smoothness_loss > 0 else 0.0
+    avg_residual_norm = epoc_residual_norm / N_val_source
+    
+    # Print residual statistics
+    print(f"    Validation residual norm (avg): {avg_residual_norm:.6f}")
+    
+    # Domain accuracy placeholders (compatible with existing code)
+    avg_domain_acc_source = 0.5
+    avg_domain_acc_target = 0.5
+    avg_domain_acc = 0.5
+
+    # Total loss (no discriminator component)
+    avg_total_loss = est_weight * avg_loss_est + domain_weight * avg_coral_loss + avg_smoothness_loss
+
+    # Return compatible structure
+    epoc_eval_return = {
+        'avg_total_loss': avg_total_loss,
+        'avg_loss_est_source': avg_loss_est_source,
+        'avg_loss_est_target': avg_loss_est_target, 
+        'avg_loss_est': avg_loss_est,
+        'avg_gan_disc_loss': 0.0,  # No discriminator
+        'avg_jmmd_loss': avg_coral_loss,  # Use CORAL for compatibility with plotting
+        'avg_nmse_source': avg_nmse_source,
+        'avg_nmse_target': avg_nmse_target,
+        'avg_nmse': avg_nmse,
+        'avg_domain_acc_source': avg_domain_acc_source,
+        'avg_domain_acc_target': avg_domain_acc_target,
+        'avg_domain_acc': avg_domain_acc,
+        'avg_smoothness_loss': avg_smoothness_loss
+    }
+
+    if return_H_gen:
+        return H_sample, epoc_eval_return, H_gen
+    return H_sample, epoc_eval_return   
+    
+### Input Domain translation 
+class CycleGANGenerator(tf.keras.Model):
+    """Generator for CycleGAN B→A translation"""
+    def __init__(self, input_channels=2, output_channels=2):
+        super().__init__()
+        # Simplified ResNet-based generator
+        self.encoder = self._build_encoder(input_channels)
+        self.decoder = self._build_decoder(output_channels)
+    
+    def _build_encoder(self, input_channels):
+        return tf.keras.Sequential([
+            tf.keras.layers.Conv2D(64, 7, padding='same', activation='relu'),
+            tf.keras.layers.Conv2D(128, 3, strides=2, padding='same', activation='relu'),
+            tf.keras.layers.Conv2D(256, 3, strides=2, padding='same', activation='relu'),
+            # Add ResNet blocks here
+        ])
+    
+    def _build_decoder(self, output_channels):
+        return tf.keras.Sequential([
+            tf.keras.layers.Conv2DTranspose(128, 3, strides=2, padding='same', activation='relu'),
+            tf.keras.layers.Conv2DTranspose(64, 3, strides=2, padding='same', activation='relu'),
+            tf.keras.layers.Conv2D(output_channels, 7, padding='same', activation='tanh'),
+        ])
+    
+    def call(self, x):
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        return decoded
+
+class CycleGANDiscriminator(tf.keras.Model):
+    """Discriminator for CycleGAN"""
+    def __init__(self, input_channels=2):
+        super().__init__()
+        self.discriminator = tf.keras.Sequential([
+            tf.keras.layers.Conv2D(64, 4, strides=2, padding='same'),
+            tf.keras.layers.LeakyReLU(0.2),
+            tf.keras.layers.Conv2D(128, 4, strides=2, padding='same'),
+            tf.keras.layers.LeakyReLU(0.2),
+            tf.keras.layers.Conv2D(256, 4, strides=2, padding='same'),
+            tf.keras.layers.LeakyReLU(0.2),
+            tf.keras.layers.Conv2D(1, 4, padding='same', activation='sigmoid'),
+        ])
+    
+    def call(self, x):
+        return self.discriminator(x)
+
+def train_step_cnn_residual_coral_with_cyclegan(model_cnn, cyclegan_B2A, cyclegan_A2B, 
+                                                disc_A, disc_B, loader_H, loss_fn, 
+                                                optimizer_cnn, optimizer_cyclegan, 
+                                                optimizer_disc, lower_range=-1, 
+                                                save_features=False, weights=None, 
+                                                linear_interp=False, cyclegan_weight=1.0):
+    """
+    Enhanced training step with CycleGAN preprocessing
+    
+    Args:
+        model_cnn: Your existing CNN Generator (unchanged)
+        cyclegan_B2A: CycleGAN Generator B→A 
+        cyclegan_A2B: CycleGAN Generator A→B
+        disc_A, disc_B: CycleGAN discriminators
+        loader_H: Your existing data loaders
+        cyclegan_weight: Weight for CycleGAN loss vs refinement loss
+    """
+    
+    # Unpack loaders (same as before)
+    loader_H_input_train_source, loader_H_true_train_source, \
+    loader_H_input_train_target, loader_H_true_train_target = loader_H
+    
+    # Initialize metrics
+    epoc_loss_est_sum = 0.0
+    epoc_loss_coral_sum = 0.0
+    epoc_loss_cyclegan_sum = 0.0
+    epoc_loss_sum = 0.0
+    
+    num_batches = min(loader_H_input_train_source.total_batches, 
+                    loader_H_input_train_target.total_batches)
+    
+    for batch_idx in range(num_batches):
+        # ============ Get Data (same as before) ============
+        H_input_batch_source = loader_H_input_train_source.next_batch()
+        H_true_batch_source = loader_H_true_train_source.next_batch()
+        H_input_batch_target = loader_H_input_train_target.next_batch()
+        H_true_batch_target = loader_H_true_train_target.next_batch()
+        
+        # Preprocessing (same as before)
+        x_src, y_src = preprocess_data(H_input_batch_source, H_true_batch_source, lower_range)
+        x_tgt, y_tgt = preprocess_data(H_input_batch_target, H_true_batch_target, lower_range)
+        
+        # ============ NEW: CycleGAN Translation ============
+        with tf.GradientTape(persistent=True) as tape:
+            # Step 1: Translate target domain B→A using CycleGAN
+            x_tgt_translated = cyclegan_B2A(x_tgt, training=True)  # B→A translation
+            x_src_translated = cyclegan_A2B(x_src, training=True)  # A→B translation (for cycle consistency)
+            
+            # Step 2: Cycle consistency
+            x_tgt_cycled = cyclegan_A2B(x_tgt_translated, training=True)  # B→A→B
+            x_src_cycled = cyclegan_B2A(x_src_translated, training=True)  # A→B→A
+            
+            # Step 3: Use translated data for CNN refinement
+            # Source domain: use original data
+            residual_src, features_src = model_cnn(x_src, training=True, return_features=True)
+            output_src = x_src + residual_src
+            
+            # Target domain: use translated data (B→A)
+            residual_tgt, features_tgt = model_cnn(x_tgt_translated, training=True, return_features=True)
+            output_tgt = x_tgt_translated + residual_tgt
+            
+            # ============ Calculate Losses ============
+            
+            # 1. Refinement loss (same as before, but on translated target)
+            loss_est_source = loss_fn[0](y_src, output_src)
+            # Note: no ground truth for target, so we only supervise source
+            
+            # 2. CORAL loss (same as before)
+            coral_loss_fn = MemoryEfficientCORALLoss(max_features=512)
+            coral_loss = coral_loss_fn(features_src, features_tgt) if features_src else 0.0
+            
+            # 3. CycleGAN losses
+            # Adversarial losses
+            disc_A_real = disc_A(x_src, training=True)
+            disc_A_fake = disc_A(x_tgt_translated, training=True)
+            disc_B_real = disc_B(x_tgt, training=True)
+            disc_B_fake = disc_B(x_src_translated, training=True)
+            
+            # Generator adversarial losses
+            gen_B2A_loss = tf.keras.losses.binary_crossentropy(tf.ones_like(disc_A_fake), disc_A_fake)
+            gen_A2B_loss = tf.keras.losses.binary_crossentropy(tf.ones_like(disc_B_fake), disc_B_fake)
+            
+            # Cycle consistency losses
+            cycle_A_loss = tf.reduce_mean(tf.abs(x_src - x_src_cycled))
+            cycle_B_loss = tf.reduce_mean(tf.abs(x_tgt - x_tgt_cycled))
+            
+            # Total CycleGAN loss
+            cyclegan_loss = (gen_B2A_loss + gen_A2B_loss + 
+                           10.0 * (cycle_A_loss + cycle_B_loss))  # λ=10 for cycle consistency
+            
+            # 4. Total loss
+            total_loss = (weights['est_weight'] * loss_est_source + 
+                         weights['domain_weight'] * coral_loss +
+                         cyclegan_weight * cyclegan_loss)
+        
+        # ============ Gradients and Updates ============
+        
+        # 1. Update CNN (same as before)
+        cnn_vars = model_cnn.trainable_variables
+        cnn_grads = tape.gradient(total_loss, cnn_vars)
+        optimizer_cnn.apply_gradients(zip(cnn_grads, cnn_vars))
+        
+        # 2. Update CycleGAN generators
+        cyclegan_vars = (cyclegan_B2A.trainable_variables + 
+                        cyclegan_A2B.trainable_variables)
+        cyclegan_grads = tape.gradient(cyclegan_loss, cyclegan_vars)
+        optimizer_cyclegan.apply_gradients(zip(cyclegan_grads, cyclegan_vars))
+        
+        # 3. Update CycleGAN discriminators
+        disc_A_loss = (tf.keras.losses.binary_crossentropy(tf.ones_like(disc_A_real), disc_A_real) +
+                        tf.keras.losses.binary_crossentropy(tf.zeros_like(disc_A_fake), disc_A_fake))
+        disc_B_loss = (tf.keras.losses.binary_crossentropy(tf.ones_like(disc_B_real), disc_B_real) +
+                        tf.keras.losses.binary_crossentropy(tf.zeros_like(disc_B_fake), disc_B_fake))
+        
+        disc_vars = disc_A.trainable_variables + disc_B.trainable_variables
+        disc_grads = tape.gradient(disc_A_loss + disc_B_loss, disc_vars)
+        optimizer_disc.apply_gradients(zip(disc_grads, disc_vars))
+        
+        del tape
+        
+        # Accumulate losses
+        epoc_loss_sum += total_loss
+        epoc_loss_est_sum += loss_est_source
+        epoc_loss_coral_sum += coral_loss
+        epoc_loss_cyclegan_sum += cyclegan_loss
+    
+    # Return metrics (same structure as before)
+    return TrainStepOutput(
+        avg_epoc_loss=epoc_loss_sum / num_batches,
+        avg_epoc_loss_est=epoc_loss_est_sum / num_batches,
+        avg_epoc_loss_domain=epoc_loss_coral_sum / num_batches,
+        avg_epoc_loss_d=0.0,  # Not used with CORAL
+        avg_epoc_loss_est_target=0.0,  # Can't calculate without ground truth
+        avg_epoc_loss_cyclegan=epoc_loss_cyclegan_sum / num_batches  # New metric
+    )
