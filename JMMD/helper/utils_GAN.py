@@ -533,10 +533,10 @@ class JMMDLossNormalized(keras.layers.Layer):
         """
         batch_size = int(source.shape[0])
         kernels = self.gaussian_kernel(source, target,
-                                      kernel_mul=self.kernel_mul, 
-                                      kernel_num=self.kernel_num, 
-                                      fix_sigma=self.fix_sigma)
-        
+                                    kernel_mul=self.kernel_mul, 
+                                    kernel_num=self.kernel_num, 
+                                    fix_sigma=self.fix_sigma)
+    
         XX = kernels[:batch_size, :batch_size]
         YY = kernels[batch_size:, batch_size:]
         XY = kernels[:batch_size, batch_size:]
@@ -3662,19 +3662,19 @@ class CNNGenerator(tf.keras.Model):
             # Pyramid channel progression strategy
             if i ==0:
                 filters = 64
-                # print(f"Block {i+1}: Using {filters} filters (increasing)")
+                print(f"Block {i+1}: Using {filters} filters (increasing)")
             elif i < n_blocks // 2:
                 # First half: exponential increase
                 filters = min(base_filters * (4 ** i), 1024)   # 2** or 4**
-                # print(f"Block {i+1}: Using {filters} filters (increasing)")
+                print(f"Block {i+1}: Using {filters} filters (increasing)")
             elif i == n_blocks -1:
                 filters = 64
-                # print(f"Block {i+1}: Using {filters} filters (decreasing)")
+                print(f"Block {i+1}: Using {filters} filters (decreasing)")
             else:
                 # Second half: exponential decrease (mirror of first half)
                 mirror_index = n_blocks - i - 1
                 filters = min(base_filters * (4 ** mirror_index), 1024)
-                # print(f"Block {i+1}: Using {filters} filters (decreasing)")
+                print(f"Block {i+1}: Using {filters} filters (decreasing)")
             
             # Use existing SameShapeBlock
             block = SameShapeBlock(filters=filters, gen_l2=gen_l2)
@@ -3708,8 +3708,9 @@ class CNNGenerator(tf.keras.Model):
         for layer_name in self.extract_layers:
             if layer_name in block_outputs:
                 feature_tensor = block_outputs[layer_name]
-                features.append(tf.reshape(feature_tensor, [tf.shape(feature_tensor)[0], -1]))
-        
+                # features.append(tf.reshape(feature_tensor, [tf.shape(feature_tensor)[0], -1]))
+                features.append(feature_tensor)  # Keep [B, H, W, C] shape
+                
         return output, features
     
     
@@ -4971,14 +4972,43 @@ class MemoryEfficientCORALLoss(keras.layers.Layer):
             total_coral_loss += self.gp_weight * coral_pooled
             num_branches += 1
             
-            print(f"    Global pooling branch: {source_feat.shape} → {src_pooled.shape}")
+            # print(f"    Global pooling branch: {source_feat.shape} → {src_pooled.shape}")
         
         # === Branch 2: Dense Reduction (Spatial Relationships) ===
         if self.dr_weight > 0:
-            # Flatten all spatial and channel dimensions
-            src_flat = tf.reshape(source_feat, [tf.shape(source_feat)[0], -1])
-            tgt_flat = tf.reshape(target_feat, [tf.shape(target_feat)[0], -1])
-            
+            # Calculate potential flattened size
+            if len(source_feat.shape) == 4:
+                h, w, c = source_feat.shape[1], source_feat.shape[2], source_feat.shape[3]
+                potential_flat_size = h * w * c
+                
+                # SMART POOLING: Apply light pooling if too large
+                if potential_flat_size > self.max_features * 2:  # Threshold: 2x max_features
+                    # Apply light spatial pooling (2x2 or 3x3 depending on size)
+                    if h > 64 or w > 64:
+                        # Large spatial dimensions - use 3x3 pooling
+                        pool_size = (3, 3)
+                        src_pooled_spatial = tf.nn.avg_pool2d(source_feat, pool_size, strides=pool_size, padding='SAME')
+                        tgt_pooled_spatial = tf.nn.avg_pool2d(target_feat, pool_size, strides=pool_size, padding='SAME')
+                    else:
+                        # Moderate spatial dimensions - use 2x2 pooling
+                        pool_size = (2, 2)
+                        src_pooled_spatial = tf.nn.avg_pool2d(source_feat, pool_size, strides=pool_size, padding='SAME')
+                        tgt_pooled_spatial = tf.nn.avg_pool2d(target_feat, pool_size, strides=pool_size, padding='SAME')
+                    
+                    # print(f"    Applied light pooling {pool_size}: {source_feat.shape} → {src_pooled_spatial.shape}")
+                    
+                    # Now flatten the pooled features
+                    src_flat = tf.reshape(src_pooled_spatial, [tf.shape(src_pooled_spatial)[0], -1])
+                    tgt_flat = tf.reshape(tgt_pooled_spatial, [tf.shape(tgt_pooled_spatial)[0], -1])
+                else:
+                    # Small enough - flatten directly
+                    src_flat = tf.reshape(source_feat, [tf.shape(source_feat)[0], -1])
+                    tgt_flat = tf.reshape(target_feat, [tf.shape(target_feat)[0], -1])
+            else:
+                # Already flattened or 2D
+                src_flat = tf.reshape(source_feat, [tf.shape(source_feat)[0], -1])
+                tgt_flat = tf.reshape(target_feat, [tf.shape(target_feat)[0], -1])
+        
             # Apply dimension reduction
             if src_flat.shape[-1] > self.max_features:
                 src_reduced = self.reduce_feature_dims(src_flat, self.max_features)
@@ -4990,7 +5020,7 @@ class MemoryEfficientCORALLoss(keras.layers.Layer):
             total_coral_loss += self.dr_weight * coral_dense
             num_branches += 1
             
-            print(f"    Dense reduction branch: {source_feat.shape} → {src_reduced.shape}")
+            # print(f"    Dense reduction branch: {source_feat.shape} → {src_reduced.shape}")
         
         # Return weighted combination
         return total_coral_loss if num_branches > 0 else 0.0
