@@ -4889,20 +4889,98 @@ def val_step_cnn_residual_source_only(model_cnn, loader_H, loss_fn, lower_range,
     return H_sample, epoc_eval_return
 
 # CORAL instead of JMMD
-class MemoryEfficientCORALLoss(keras.layers.Layer):
+class GlobalPoolingCORALLoss(keras.layers.Layer):
     """
-    Memory-Efficient CORAL Loss with Hybrid Feature Reduction
+    Pure Global Average Pooling CORAL Loss
+    Uses 100% global pooling for maximum memory efficiency and channel-wise statistics
+    """
+    def __init__(self, **kwargs):
+        super(GlobalPoolingCORALLoss, self).__init__(**kwargs)
+        print(f"GlobalPoolingCORALLoss initialized: 100% Global Average Pooling")
+    
+    def compute_covariance(self, features):
+        """
+        Compute covariance matrix of features
+        Same as your original implementation
+        """
+        # Center the features (subtract mean)
+        features_centered = features - tf.reduce_mean(features, axis=0, keepdims=True)
+        
+        # Compute covariance matrix
+        n = tf.cast(tf.shape(features_centered)[0], tf.float32)
+        cov_matrix = tf.matmul(features_centered, features_centered, transpose_a=True) / (n - 1)
+        
+        return cov_matrix
+    
+    def coral_loss(self, source_features, target_features):
+        """
+        Compute CORAL loss between source and target features
+        """
+        # Compute covariance matrices
+        source_cov = self.compute_covariance(source_features)
+        target_cov = self.compute_covariance(target_features)
+        
+        # CORAL loss: Frobenius norm of covariance difference
+        loss = tf.reduce_sum(tf.square(source_cov - target_cov))
+        
+        # Normalize by feature dimension squared
+        d = tf.cast(source_features.shape[1], tf.float32)
+        loss = loss / (4.0 * d * d)
+        
+        return loss
+    
+    def call(self, source_list, target_list):
+        """
+        Compute CORAL loss across multiple layers using 100% global pooling
+        
+        Args:
+            source_list: list of source features from different layers
+            target_list: list of target features from different layers
+        """
+        coral_loss_total = 0.0
+        
+        for i, (source_feat, target_feat) in enumerate(zip(source_list, target_list)):
+            # Apply Global Average Pooling for ALL feature types
+            if len(source_feat.shape) == 4:  # [B, H, W, C]
+                # Global Average Pooling: [B, H, W, C] → [B, C]
+                source_pooled = tf.reduce_mean(source_feat, axis=[1, 2])
+                target_pooled = tf.reduce_mean(target_feat, axis=[1, 2])
+            elif len(source_feat.shape) == 3:  # [B, H, C] or [B, W, C]
+                # Global Average Pooling: [B, H, C] → [B, C]
+                source_pooled = tf.reduce_mean(source_feat, axis=1)
+                target_pooled = tf.reduce_mean(target_feat, axis=1)
+            elif len(source_feat.shape) == 2:  # [B, C] - already pooled
+                source_pooled = source_feat
+                target_pooled = target_feat
+            else:
+                # Flatten any other shapes and then global pool
+                source_flat = tf.reshape(source_feat, [tf.shape(source_feat)[0], -1])
+                target_flat = tf.reshape(target_feat, [tf.shape(target_feat)[0], -1])
+                # For flattened features, just use as-is (treat as [B, Features])
+                source_pooled = source_flat
+                target_pooled = target_flat
+            
+            # Compute CORAL loss for this layer
+            layer_coral_loss = self.coral_loss(source_pooled, target_pooled)
+            coral_loss_total += layer_coral_loss
+        
+        return coral_loss_total / len(source_list)  # Average across layers
+
+
+class HybridCORALLoss(keras.layers.Layer):
+    """
+    Hybrid CORAL Loss with Hybrid Feature Reduction
     Combines global pooling + dimension reduction for optimal performance/memory trade-off
     """
     def __init__(self, max_features=1024, use_global_pooling=True, 
                  global_pooling_weight=0.7, dense_reduction_weight=0.3, **kwargs):
-        super(MemoryEfficientCORALLoss, self).__init__(**kwargs)
+        super(HybridCORALLoss, self).__init__(**kwargs)
         self.max_features = max_features
         self.use_global_pooling = use_global_pooling
         self.gp_weight = global_pooling_weight      # Weight for global pooling branch
         self.dr_weight = dense_reduction_weight     # Weight for dense reduction branch
         
-        print(f"MemoryEfficientCORALLoss initialized:")
+        print(f"HybridCORALLoss initialized:")
         print(f"  - Max features: {max_features}")
         print(f"  - Global pooling: {use_global_pooling}")
         print(f"  - GP weight: {global_pooling_weight}, DR weight: {dense_reduction_weight}")
@@ -5075,7 +5153,7 @@ def train_step_wgan_gp_coral_residual(model, loader_H, loss_fn, optimizers, lowe
     
     # Initialize CORAL loss in case not provided (should be initialized outside)
     if coral_loss_fn is None:
-        coral_loss_fn = MemoryEfficientCORALLoss()
+        coral_loss_fn = GlobalPoolingCORALLoss()
     
     epoc_loss_g = 0.0
     epoc_loss_d = 0.0
@@ -5269,7 +5347,7 @@ def val_step_wgan_gp_coral_residual(model, loader_H, loss_fn, lower_range, coral
     
     # Initialize CORAL loss in case not provided (should be initialized outside)
     if coral_loss_fn is None:
-        coral_loss_fn = MemoryEfficientCORALLoss()
+        coral_loss_fn = GlobalPoolingCORALLoss()
     
     N_val_source = 0
     N_val_target = 0
@@ -5491,7 +5569,7 @@ def train_step_cnn_residual_coral(model_cnn, loader_H, loss_fn, optimizer, lower
     
     # Initialize CORAL in case not provided (should be initialized outside)
     if coral_loss_fn is None:
-        coral_loss_fn = MemoryEfficientCORALLoss()
+        coral_loss_fn = GlobalPoolingCORALLoss()
     
     epoc_loss_total = 0.0
     epoc_loss_est = 0.0
@@ -5671,7 +5749,7 @@ def val_step_cnn_residual_coral(model_cnn, loader_H, loss_fn, lower_range, nsymb
     
     # Initialize CORAL loss in case not provided (should be initialized outside)
     if coral_loss_fn is None:
-        coral_loss_fn = MemoryEfficientCORALLoss()
+        coral_loss_fn = GlobalPoolingCORALLoss()
     
     N_val_source = 0
     N_val_target = 0
