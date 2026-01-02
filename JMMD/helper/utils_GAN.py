@@ -6082,35 +6082,24 @@ def train_step_cnn_residual_fda(model_cnn, loader_H, loss_fn, optimizer, lower_r
                                 fda_win_h=13, fda_win_w=3, fda_weight=1.0):
     """
     CNN-only residual training step with FDA input preprocessing
-    
-    Args:
-        model_cnn: CNN model (CNNGenerator instance)
-        loader_H: tuple of (loader_H_input_train_src, loader_H_true_train_src, 
-                        loader_H_input_train_tgt, loader_H_true_train_tgt)
-        loss_fn: tuple of loss functions (estimation_loss, bce_loss) - only first one used
-        optimizer: single optimizer for CNN
-        lower_range: lower range for min-max scaling
-        save_features: bool, whether to save features for PAD computation
-        nsymb: number of symbols
-        weights: weight dictionary
-        linear_interp: linear interpolation flag
-        fda_win_h: FDA window height for mixing (default 13)
-        fda_win_w: FDA window width for mixing (default 3)
-        fda_weight: Weight for FDA vs source training (0.5 = 50% FDA, 50% source)
     """
     loader_H_input_train_src, loader_H_true_train_src, \
         loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
     loss_fn_est = loss_fn[0]  # Only need estimation loss
     
-    est_weight = weights.get('est_weight', 1.0)
-    temporal_weight = weights.get('temporal_weight', 0.0)
-    frequency_weight = weights.get('frequency_weight', 0.0)
+    est_weight = weights.get('est_weight', 1.0) if weights else 1.0
+    temporal_weight = weights.get('temporal_weight', 0.0) if weights else 0.0
+    frequency_weight = weights.get('frequency_weight', 0.0) if weights else 0.0
     
     epoc_loss_total = 0.0
     epoc_loss_est = 0.0
-    epoc_loss_est_target = 0.0  # Monitor target performance  
+    epoc_loss_est_target = 0.0
     epoc_residual_norm = 0.0
     N_train = 0
+    
+    # Initialize feature variables
+    features_src = None
+    features_tgt = None
     
     if save_features:
         features_h5_path_source = 'features_source.h5'
@@ -6133,7 +6122,7 @@ def train_step_cnn_residual_fda(model_cnn, loader_H, loss_fn, optimizer, lower_r
         y_tgt = loader_H_true_train_tgt.next_batch()
         N_train += x_src.shape[0]
 
-        # Preprocess source data (same as CORAL version)
+        # Preprocess source data
         x_src_real = complx2real(x_src)
         y_src_real = complx2real(y_src)
         x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
@@ -6141,7 +6130,7 @@ def train_step_cnn_residual_fda(model_cnn, loader_H, loss_fn, optimizer, lower_r
         x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
         y_scaled_src, _, _ = minmaxScaler(y_src_real, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
 
-        # Preprocess target data (same as CORAL version)
+        # Preprocess target data
         x_tgt_real = complx2real(x_tgt)
         y_tgt_real = complx2real(y_tgt)
         x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
@@ -6150,11 +6139,10 @@ def train_step_cnn_residual_fda(model_cnn, loader_H, loss_fn, optimizer, lower_r
         y_scaled_tgt, _, _ = minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
 
         # ============ FDA PREPROCESSING ============
-        # Convert back to complex for FDA (combine real/imag channels)
-        x_src_complex = tf.complex(x_scaled_src[:,:,:,0], x_scaled_src[:,:,:,1])  # [batch, 132, 14]
-        x_tgt_complex = tf.complex(x_scaled_tgt[:,:,:,0], x_scaled_tgt[:,:,:,1])  # [batch, 132, 14]
+        # Convert back to complex for FDA
+        x_src_complex = tf.complex(x_scaled_src[:,:,:,0], x_scaled_src[:,:,:,1])
+        x_tgt_complex = tf.complex(x_scaled_tgt[:,:,:,0], x_scaled_tgt[:,:,:,1])
         
-        # Apply FDA: Strategy A (Source content + Target style)
         # Extract Delay-Doppler representations
         src_amplitude, src_phase = F_extract_DD(x_src_complex)
         tgt_amplitude, tgt_phase = F_extract_DD(x_tgt_complex)
@@ -6168,61 +6156,59 @@ def train_step_cnn_residual_fda(model_cnn, loader_H, loss_fn, optimizer, lower_r
         # Convert back to Time-Frequency domain
         x_fda_mixed_complex = F_inverse_DD(mixed_complex_dd)
         
-        # Convert back to real format for CNN [batch, 132, 14, 2]
-        x_fda_mixed = tf.stack([tf.math.abs(x_fda_mixed_complex), tf.math.imag(x_fda_mixed_complex)], axis=-1)
+        # 
+        x_fda_mixed = tf.stack([tf.math.real(x_fda_mixed_complex), tf.math.imag(x_fda_mixed_complex)], axis=-1)
         
-        # === Train CNN with RESIDUAL learning on FDA-mixed input ===
+        # === Train CNN with RESIDUAL learning ===
         with tf.GradientTape() as tape:
-            # Training strategy: Mix FDA-adapted input with source training
+            # 
+            batch_size = x_scaled_src.shape[0]  # Use .shape instead of tf.shape
+            
             if fda_weight < 1.0:
                 # Dual training: Part source, part FDA-mixed
-                batch_size = tf.shape(x_scaled_src)[0]
                 fda_samples = int(batch_size * fda_weight)
+                remaining_samples = batch_size - fda_samples
                 
-                # Split batch
-                x_train_fda = x_fda_mixed[:fda_samples]      # FDA-mixed input
-                x_train_src = x_scaled_src[fda_samples:]     # Pure source input
-                y_train_combined = y_scaled_src              # All use source labels
-                
-                # Forward pass on FDA-mixed samples
-                if fda_samples > 0:
+                if fda_samples > 0 and remaining_samples > 0:
+                    # Split batch
+                    x_train_fda = x_fda_mixed[:fda_samples]
+                    x_train_src = x_scaled_src[fda_samples:]
+                    y_train_combined = y_scaled_src  # All use source labels
+                    
+                    # Forward pass on FDA-mixed samples
                     residual_fda, features_fda = model_cnn(x_train_fda, training=True, return_features=True)
                     x_corrected_fda = x_train_fda + residual_fda
-                else:
-                    residual_fda, features_fda = None, None
-                    x_corrected_fda = tf.zeros([0] + x_scaled_src.shape[1:].as_list())
-                
-                # Forward pass on pure source samples
-                if fda_samples < batch_size:
+                    
+                    # Forward pass on pure source samples
                     residual_src, features_src = model_cnn(x_train_src, training=True, return_features=True)
                     x_corrected_src = x_train_src + residual_src
-                else:
-                    residual_src, features_src = None, None
-                    x_corrected_src = tf.zeros([0] + x_scaled_src.shape[1:].as_list())
-                
-                # Combine corrected outputs
-                x_corrected_combined = tf.concat([x_corrected_fda, x_corrected_src], axis=0)
-                
-                # Estimation loss on combined outputs vs source labels
-                est_loss = loss_fn_est(y_train_combined, x_corrected_combined)
-                
-                # Combine residuals for regularization
-                if residual_fda is not None and residual_src is not None:
+                    
+                    # Combine corrected outputs
+                    x_corrected_combined = tf.concat([x_corrected_fda, x_corrected_src], axis=0)
                     residual_combined = tf.concat([residual_fda, residual_src], axis=0)
-                elif residual_fda is not None:
-                    residual_combined = residual_fda
-                else:
+                    
+                elif fda_samples == 0:
+                    # Pure source training
+                    residual_src, features_src = model_cnn(x_scaled_src, training=True, return_features=True)
+                    x_corrected_combined = x_scaled_src + residual_src
                     residual_combined = residual_src
+                else:
+                    # Pure FDA training
+                    residual_fda, features_src = model_cnn(x_fda_mixed, training=True, return_features=True)
+                    x_corrected_combined = x_fda_mixed + residual_fda
+                    residual_combined = residual_fda
+                
+                # Estimation loss
+                est_loss = loss_fn_est(y_scaled_src, x_corrected_combined)
                     
             else:
                 # Pure FDA training: Use only FDA-mixed input
-                residual_fda, features_fda = model_cnn(x_fda_mixed, training=True, return_features=True)
+                residual_fda, features_src = model_cnn(x_fda_mixed, training=True, return_features=True)
                 x_corrected_fda = x_fda_mixed + residual_fda
+                residual_combined = residual_fda
                 
                 # Estimation loss: FDA-corrected input vs source labels
                 est_loss = loss_fn_est(y_scaled_src, x_corrected_fda)
-                residual_combined = residual_fda
-                features_src = features_fda
             
             # Residual regularization
             residual_reg = 0.001 * tf.reduce_mean(tf.square(residual_combined))
@@ -6240,7 +6226,7 @@ def train_step_cnn_residual_fda(model_cnn, loader_H, loss_fn, optimizer, lower_r
             else:
                 smoothness_loss = 0.0
             
-            # Total loss (NO domain adaptation loss - FDA handles domain gap)
+            # Total loss
             total_loss = est_weight * est_loss + residual_reg + smoothness_loss
             
             # Add L2 regularization from model
@@ -6254,9 +6240,9 @@ def train_step_cnn_residual_fda(model_cnn, loader_H, loss_fn, optimizer, lower_r
         epoc_loss_est_target += est_loss_tgt.numpy() * x_tgt.shape[0]
         
         # === Save features if required ===
-        if save_features:
-            # Save source features (or FDA features if pure FDA mode)
-            features_np_source = features_src[-1].numpy() if features_src else features_fda[-1].numpy()
+        if save_features and features_src is not None:
+            # Save features
+            features_np_source = features_src[-1].numpy()
             if features_dataset_source is None:
                 features_dataset_source = features_h5_source.create_dataset(
                     'features',
@@ -6268,18 +6254,18 @@ def train_step_cnn_residual_fda(model_cnn, loader_H, loss_fn, optimizer, lower_r
                 features_dataset_source.resize(features_dataset_source.shape[0] + features_np_source.shape[0], axis=0)
                 features_dataset_source[-features_np_source.shape[0]:] = features_np_source
                 
-            # Save target features
-            features_np_target = features_tgt[-1].numpy()
-            if features_dataset_target is None:
-                features_dataset_target = features_h5_target.create_dataset(
-                    'features',
-                    data=features_np_target,
-                    maxshape=(None,) + features_np_target.shape[1:],
-                    chunks=True
-                )
-            else:
-                features_dataset_target.resize(features_dataset_target.shape[0] + features_np_target.shape[0], axis=0)
-                features_dataset_target[-features_np_target.shape[0]:] = features_np_target
+            if features_tgt is not None:
+                features_np_target = features_tgt[-1].numpy()
+                if features_dataset_target is None:
+                    features_dataset_target = features_h5_target.create_dataset(
+                        'features',
+                        data=features_np_target,
+                        maxshape=(None,) + features_np_target.shape[1:],
+                        chunks=True
+                    )
+                else:
+                    features_dataset_target.resize(features_dataset_target.shape[0] + features_np_target.shape[0], axis=0)
+                    features_dataset_target[-features_np_target.shape[0]:] = features_np_target
         
         # Single optimizer update
         grads = tape.gradient(total_loss, model_cnn.trainable_variables)
@@ -6305,14 +6291,14 @@ def train_step_cnn_residual_fda(model_cnn, loader_H, loss_fn, optimizer, lower_r
     print(f"    FDA residual norm (avg): {avg_residual_norm:.6f}")
     print(f"    FDA mixing window: {fda_win_h}x{fda_win_w}, weight: {fda_weight}")
     
-    # Return compatible structure (no domain adaptation loss)
+    # Return compatible structure
     return train_step_Output(
         avg_epoc_loss_est=avg_loss_est,
         avg_epoc_loss_domain=0.0,  # No domain loss - FDA handles domain gap at input level
         avg_epoc_loss=avg_loss_total,
         avg_epoc_loss_est_target=avg_loss_est_target,
-        features_source=features_src[-1] if 'features_src' in locals() and features_src else None,
-        film_features_source=features_src[-1] if 'features_src' in locals() and features_src else None,
+        features_source=features_src[-1] if features_src is not None else None,
+        film_features_source=features_src[-1] if features_src is not None else None,
         avg_epoc_loss_d=0.0  # No discriminator
     )
     
@@ -6320,6 +6306,8 @@ def val_step_cnn_residual_fda(model_cnn, loader_H, loss_fn, lower_range, nsymb=1
                                 weights=None, linear_interp=False, return_H_gen=False,
                                 fda_win_h=13, fda_win_w=3, fda_weight=1.0):
     """
+    Validate with separate source/target validation sets (Real deployment performance)
+    
     Validation step for CNN-only residual learning with FDA input preprocessing
     
     Args:
@@ -6482,7 +6470,7 @@ def val_step_cnn_residual_fda(model_cnn, loader_H, loss_fn, lower_range, nsymb=1
                 x_fda_mixed_complex_fda = F_inverse_DD(mixed_complex_dd_fda)
                 
                 # Convert back to real format for CNN [batch, 132, 14, 2]
-                x_fda_mixed_fda = tf.stack([tf.math.abs(x_fda_mixed_complex_fda), tf.math.imag(x_fda_mixed_complex_fda)], axis=-1)
+                x_fda_mixed_fda = tf.stack([tf.math.real(x_fda_mixed_complex_fda), tf.math.imag(x_fda_mixed_complex_fda)], axis=-1)
                 
                 # Test FDA-mixed input performance
                 residual_fda, _ = model_cnn(x_fda_mixed_fda, training=False, return_features=False)

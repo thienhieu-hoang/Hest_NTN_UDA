@@ -55,7 +55,7 @@ scheduler = WeightScheduler(strategy='reconstruction_first', start_domain_weight
 
 fda_win_h=13 
 fda_win_w=3 
-fda_weight=1.0
+fda_weight=0.8 # 1.0
 
 if norm_approach == 'minmax':
     if lower_range == 0:
