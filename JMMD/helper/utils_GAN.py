@@ -6621,138 +6621,283 @@ class CycleGANDiscriminator(tf.keras.Model):
     def call(self, x):
         return self.discriminator(x)
 
-def train_step_cnn_residual_coral_with_cyclegan(model_cnn, cyclegan_B2A, cyclegan_A2B, 
-                                                disc_A, disc_B, loader_H, loss_fn, 
-                                                optimizer_cnn, optimizer_cyclegan, 
-                                                optimizer_disc, lower_range=-1, 
-                                                save_features=False, weights=None, 
-                                                linear_interp=False, cyclegan_weight=1.0):
+def train_step_cyclegan_input_translation(generators, discriminators, loader_H, loss_fn, optimizers, 
+                                        lower_range=-1, save_features=False, nsymb=14, weights=None, 
+                                        linear_interp=False, cycle_consistency_weight=10.0, 
+                                        identity_weight=0.5, translation_weight=1.0):
     """
-    Enhanced training step with CycleGAN preprocessing
-    
-    Args:
-        model_cnn: Your existing CNN Generator (unchanged)
-        cyclegan_B2A: CycleGAN Generator B→A 
-        cyclegan_A2B: CycleGAN Generator A→B
-        disc_A, disc_B: CycleGAN discriminators
-        loader_H: Your existing data loaders
-        cyclegan_weight: Weight for CycleGAN loss vs refinement loss
+    STANDARD CycleGAN for input domain translation (TDL-B → TDL-D style)
+    Generators do DIRECT translation, not residual learning
     """
+    loader_H_input_train_src, loader_H_true_train_src, \
+        loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
     
-    # Unpack loaders (same as before)
-    loader_H_input_train_source, loader_H_true_train_source, \
-    loader_H_input_train_target, loader_H_true_train_target = loader_H
+    # Unpack models - these are DIRECT translation generators
+    G_A2B, G_B2A = generators  # A=TDL-D, B=TDL-B - DIRECT translation
+    D_A, D_B = discriminators
     
-    # Initialize metrics
-    epoc_loss_est_sum = 0.0
-    epoc_loss_coral_sum = 0.0
-    epoc_loss_cyclegan_sum = 0.0
-    epoc_loss_sum = 0.0
+    # Unpack optimizers
+    if len(optimizers) == 4:
+        G_A2B_opt, G_B2A_opt, D_A_opt, D_B_opt = optimizers
+    else:
+        gen_opt, disc_opt = optimizers
+        G_A2B_opt = G_B2A_opt = gen_opt
+        D_A_opt = D_B_opt = disc_opt
     
-    num_batches = min(loader_H_input_train_source.total_batches, 
-                    loader_H_input_train_target.total_batches)
+    # Loss functions and weights
+    loss_fn_est = loss_fn[0]
+    loss_fn_bce = loss_fn[1] if len(loss_fn) > 1 else tf.keras.losses.BinaryCrossentropy()
     
-    for batch_idx in range(num_batches):
-        # ============ Get Data (same as before) ============
-        H_input_batch_source = loader_H_input_train_source.next_batch()
-        H_true_batch_source = loader_H_true_train_source.next_batch()
-        H_input_batch_target = loader_H_input_train_target.next_batch()
-        H_true_batch_target = loader_H_true_train_target.next_batch()
-        
+    est_weight = weights.get('est_weight', 1.0) if weights else 1.0
+    domain_weight = weights.get('domain_weight', 1.0) if weights else 1.0
+    temporal_weight = weights.get('temporal_weight', 0.0) if weights else 0.0
+    frequency_weight = weights.get('frequency_weight', 0.0) if weights else 0.0
+    adv_weight = weights.get('adv_weight', 0.01) if weights else 0.01
+    
+    # Training metrics
+    epoc_loss_total = 0.0
+    epoc_loss_est = 0.0
+    epoc_loss_est_target = 0.0
+    epoc_loss_cycle = 0.0
+    epoc_loss_identity = 0.0
+    epoc_loss_discriminator = 0.0
+    N_train = 0
+    
+    # Initialize for return statement
+    last_translated_A = None
+    
+    # Feature storage
+    if save_features:
+        features_h5_path_source = 'features_source.h5'
+        if os.path.exists(features_h5_path_source):
+            os.remove(features_h5_path_source)
+        features_h5_source = h5py.File(features_h5_path_source, 'w')
+        features_dataset_source = None
+
+        features_h5_path_target = 'features_target.h5'
+        if os.path.exists(features_h5_path_target):
+            os.remove(features_h5_path_target)   
+        features_h5_target = h5py.File(features_h5_target, 'w')
+        features_dataset_target = None
+    
+    for batch_idx in range(loader_H_true_train_src.total_batches):
+        # Get and preprocess data (same as before)
+        x_src = loader_H_input_train_src.next_batch()
+        y_src = loader_H_true_train_src.next_batch()
+        x_tgt = loader_H_input_train_tgt.next_batch()
+        y_tgt = loader_H_true_train_tgt.next_batch()
+        N_train += x_src.shape[0]
+
         # Preprocessing (same as before)
-        x_src, y_src = preprocess_data(H_input_batch_source, H_true_batch_source, lower_range)
-        x_tgt, y_tgt = preprocess_data(H_input_batch_target, H_true_batch_target, lower_range)
+        x_src_real = complx2real(x_src)
+        y_src_real = complx2real(y_src)
+        x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
+        y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
+        x_scaled_A, x_min_A, x_max_A = minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_A, _, _ = minmaxScaler(y_src_real, min_pre=x_min_A, max_pre=x_max_A, lower_range=lower_range)
+
+        x_tgt_real = complx2real(x_tgt)
+        y_tgt_real = complx2real(y_tgt)
+        x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
+        y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
+        x_scaled_B, x_min_B, x_max_B = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_B, _, _ = minmaxScaler(y_tgt_real, min_pre=x_min_B, max_pre=x_max_B, lower_range=lower_range)
+
+        # === 1. Train Discriminators (STANDARD CycleGAN) ===
+        with tf.GradientTape() as tape_D_A:
+            # DIRECT TRANSLATION (not residual)
+            translated_A = G_B2A(x_scaled_B, training=False)  # B → A translation ✅
+            
+            # Discriminator A: Real A vs Translated A (B→A)
+            d_real_A = D_A(y_scaled_A, training=True)  # Real clean A channels
+            d_fake_A = D_A(translated_A, training=True)  # Translated B→A channels
+            
+            real_A_loss = loss_fn_bce(tf.ones_like(d_real_A), d_real_A)
+            fake_A_loss = loss_fn_bce(tf.zeros_like(d_fake_A), d_fake_A)
+            D_A_loss = (real_A_loss + fake_A_loss) / 2
+            
+        grads_D_A = tape_D_A.gradient(D_A_loss, D_A.trainable_variables)
+        D_A_opt.apply_gradients(zip(grads_D_A, D_A.trainable_variables))
+
+        with tf.GradientTape() as tape_D_B:
+            # DIRECT TRANSLATION (not residual)
+            translated_B = G_A2B(x_scaled_A, training=False)  # A → B translation ✅
+            
+            # Discriminator B: Real B vs Translated B (A→B)
+            d_real_B = D_B(y_scaled_B, training=True)  # Real clean B channels
+            d_fake_B = D_B(translated_B, training=True)  # Translated A→B channels
+            
+            real_B_loss = loss_fn_bce(tf.ones_like(d_real_B), d_real_B)
+            fake_B_loss = loss_fn_bce(tf.zeros_like(d_fake_B), d_fake_B)
+            D_B_loss = (real_B_loss + fake_B_loss) / 2
+            
+        grads_D_B = tape_D_B.gradient(D_B_loss, D_B.trainable_variables)
+        D_B_opt.apply_gradients(zip(grads_D_B, D_B.trainable_variables))
+
+        # === 2. Train Generators (STANDARD CycleGAN) ===
+        with tf.GradientTape() as tape_G_A2B, tf.GradientTape() as tape_G_B2A:
+            # DIRECT TRANSLATIONS (not residual learning) ✅
+            translated_B = G_A2B(x_scaled_A, training=True)  # A → B translation
+            translated_A = G_B2A(x_scaled_B, training=True)  # B → A translation
+            
+            # Store for return statement
+            last_translated_A = translated_A
+            
+            # === CYCLE CONSISTENCY (STANDARD CycleGAN) ===
+            cycle_A = G_B2A(translated_B, training=True)  # A → B → A
+            cycle_B = G_A2B(translated_A, training=True)  # B → A → B
+            
+            # === IDENTITY MAPPING (STANDARD CycleGAN) ===
+            identity_A = G_B2A(x_scaled_A, training=True)  # Should return A when given A
+            identity_B = G_A2B(x_scaled_B, training=True)  # Should return B when given B
+            
+            # === ADVERSARIAL LOSSES (fool discriminators) ===
+            d_fake_A_for_gen = D_A(translated_A, training=False)
+            d_fake_B_for_gen = D_B(translated_B, training=False)
+            
+            G_B2A_adv_loss = loss_fn_bce(tf.ones_like(d_fake_A_for_gen), d_fake_A_for_gen)
+            G_A2B_adv_loss = loss_fn_bce(tf.ones_like(d_fake_B_for_gen), d_fake_B_for_gen)
+            
+            # === CYCLE CONSISTENCY LOSS ===
+            cycle_A_loss = tf.reduce_mean(tf.abs(cycle_A - x_scaled_A))  # L1 loss
+            cycle_B_loss = tf.reduce_mean(tf.abs(cycle_B - x_scaled_B))  # L1 loss
+            cycle_consistency_loss = cycle_A_loss + cycle_B_loss
+            
+            # === IDENTITY LOSS ===
+            identity_A_loss = tf.reduce_mean(tf.abs(identity_A - x_scaled_A))  # L1 loss
+            identity_B_loss = tf.reduce_mean(tf.abs(identity_B - x_scaled_B))  # L1 loss
+            identity_loss = identity_A_loss + identity_B_loss
+            
+            # === ESTIMATION LOSSES with HYBRID TRAINING ===
+            batch_size = tf.shape(x_scaled_A)[0]
+            
+            if translation_weight < 1.0:
+                # HYBRID TRAINING: Mix translated and original samples
+                translated_samples = tf.cast(tf.cast(batch_size, tf.float32) * translation_weight, tf.int32)
+                original_samples = batch_size - translated_samples
+                
+                if translated_samples > 0 and original_samples > 0:
+                    # Split batch for hybrid training
+                    # Part 1: Translated estimation
+                    est_loss_A_translated = loss_fn_est(y_scaled_A[:translated_samples], 
+                                                        translated_A[:translated_samples])
+                    est_loss_B_translated = loss_fn_est(y_scaled_B[:translated_samples], 
+                                                        translated_B[:translated_samples])
+                    
+                    # Part 2: Original estimation (source preservation)
+                    est_loss_A_original = loss_fn_est(y_scaled_A[translated_samples:], 
+                                                    x_scaled_A[translated_samples:])  # ← Original source
+                    est_loss_B_original = loss_fn_est(y_scaled_B[translated_samples:], 
+                                                    x_scaled_B[translated_samples:])  # ← Original target
+                    
+                    # Weighted combination
+                    est_loss_A = (translation_weight * est_loss_A_translated + 
+                                (1.0 - translation_weight) * est_loss_A_original)
+                    est_loss_B = (translation_weight * est_loss_B_translated + 
+                                (1.0 - translation_weight) * est_loss_B_original)
+                    
+                elif translated_samples >= original_samples:
+                    # Mostly translated
+                    est_loss_A = loss_fn_est(y_scaled_A, translated_A)
+                    est_loss_B = loss_fn_est(y_scaled_B, translated_B)
+                else:
+                    # Mostly original
+                    est_loss_A = loss_fn_est(y_scaled_A, x_scaled_A)  # Original source
+                    est_loss_B = loss_fn_est(y_scaled_B, x_scaled_B)  # Original target
+            else:
+                # Pure translated training (original behavior)
+                est_loss_A = loss_fn_est(y_scaled_A, translated_A)
+                est_loss_B = loss_fn_est(y_scaled_B, translated_B)
+            
+            # === SMOOTHNESS REGULARIZATION ===
+            if temporal_weight != 0 or frequency_weight != 0:
+                smoothness_A = compute_total_smoothness_loss(translated_A, temporal_weight=temporal_weight, frequency_weight=frequency_weight)
+                smoothness_B = compute_total_smoothness_loss(translated_B, temporal_weight=temporal_weight, frequency_weight=frequency_weight)
+                smoothness_loss = (smoothness_A + smoothness_B) / 2
+            else:
+                smoothness_loss = 0.0
+            
+            # === TOTAL GENERATOR LOSSES ===
+            G_A2B_total_loss = (adv_weight * G_A2B_adv_loss + 
+                                cycle_consistency_weight * cycle_consistency_loss + 
+                                identity_weight * identity_loss +
+                                est_weight * est_loss_B +  # Estimation quality on translated/hybrid B
+                                smoothness_loss)
+            
+            G_B2A_total_loss = (adv_weight * G_B2A_adv_loss + 
+                                cycle_consistency_weight * cycle_consistency_loss + 
+                                identity_weight * identity_loss +
+                                est_weight * est_loss_A +  # Estimation quality on translated/hybrid A
+                                smoothness_loss)
         
-        # ============ NEW: CycleGAN Translation ============
-        with tf.GradientTape(persistent=True) as tape:
-            # Step 1: Translate target domain B→A using CycleGAN
-            x_tgt_translated = cyclegan_B2A(x_tgt, training=True)  # B→A translation
-            x_src_translated = cyclegan_A2B(x_src, training=True)  # A→B translation (for cycle consistency)
-            
-            # Step 2: Cycle consistency
-            x_tgt_cycled = cyclegan_A2B(x_tgt_translated, training=True)  # B→A→B
-            x_src_cycled = cyclegan_B2A(x_src_translated, training=True)  # A→B→A
-            
-            # Step 3: Use translated data for CNN refinement
-            # Source domain: use original data
-            residual_src, features_src = model_cnn(x_src, training=True, return_features=True)
-            output_src = x_src + residual_src
-            
-            # Target domain: use translated data (B→A)
-            residual_tgt, features_tgt = model_cnn(x_tgt_translated, training=True, return_features=True)
-            output_tgt = x_tgt_translated + residual_tgt
-            
-            # ============ Calculate Losses ============
-            
-            # 1. Refinement loss (same as before, but on translated target)
-            loss_est_source = loss_fn[0](y_src, output_src)
-            # Note: no ground truth for target, so we only supervise source
-            
-            # 2. CORAL loss (same as before)
-            coral_loss_fn = MemoryEfficientCORALLoss(max_features=512)
-            coral_loss = coral_loss_fn(features_src, features_tgt) if features_src else 0.0
-            
-            # 3. CycleGAN losses
-            # Adversarial losses
-            disc_A_real = disc_A(x_src, training=True)
-            disc_A_fake = disc_A(x_tgt_translated, training=True)
-            disc_B_real = disc_B(x_tgt, training=True)
-            disc_B_fake = disc_B(x_src_translated, training=True)
-            
-            # Generator adversarial losses
-            gen_B2A_loss = tf.keras.losses.binary_crossentropy(tf.ones_like(disc_A_fake), disc_A_fake)
-            gen_A2B_loss = tf.keras.losses.binary_crossentropy(tf.ones_like(disc_B_fake), disc_B_fake)
-            
-            # Cycle consistency losses
-            cycle_A_loss = tf.reduce_mean(tf.abs(x_src - x_src_cycled))
-            cycle_B_loss = tf.reduce_mean(tf.abs(x_tgt - x_tgt_cycled))
-            
-            # Total CycleGAN loss
-            cyclegan_loss = (gen_B2A_loss + gen_A2B_loss + 
-                           10.0 * (cycle_A_loss + cycle_B_loss))  # λ=10 for cycle consistency
-            
-            # 4. Total loss
-            total_loss = (weights['est_weight'] * loss_est_source + 
-                         weights['domain_weight'] * coral_loss +
-                         cyclegan_weight * cyclegan_loss)
+        # Update generators
+        grads_G_A2B = tape_G_A2B.gradient(G_A2B_total_loss, G_A2B.trainable_variables)
+        G_A2B_opt.apply_gradients(zip(grads_G_A2B, G_A2B.trainable_variables))
         
-        # ============ Gradients and Updates ============
+        grads_G_B2A = tape_G_B2A.gradient(G_B2A_total_loss, G_B2A.trainable_variables)
+        G_B2A_opt.apply_gradients(zip(grads_G_B2A, G_B2A.trainable_variables))
         
-        # 1. Update CNN (same as before)
-        cnn_vars = model_cnn.trainable_variables
-        cnn_grads = tape.gradient(total_loss, cnn_vars)
-        optimizer_cnn.apply_gradients(zip(cnn_grads, cnn_vars))
-        
-        # 2. Update CycleGAN generators
-        cyclegan_vars = (cyclegan_B2A.trainable_variables + 
-                        cyclegan_A2B.trainable_variables)
-        cyclegan_grads = tape.gradient(cyclegan_loss, cyclegan_vars)
-        optimizer_cyclegan.apply_gradients(zip(cyclegan_grads, cyclegan_vars))
-        
-        # 3. Update CycleGAN discriminators
-        disc_A_loss = (tf.keras.losses.binary_crossentropy(tf.ones_like(disc_A_real), disc_A_real) +
-                        tf.keras.losses.binary_crossentropy(tf.zeros_like(disc_A_fake), disc_A_fake))
-        disc_B_loss = (tf.keras.losses.binary_crossentropy(tf.ones_like(disc_B_real), disc_B_real) +
-                        tf.keras.losses.binary_crossentropy(tf.zeros_like(disc_B_fake), disc_B_fake))
-        
-        disc_vars = disc_A.trainable_variables + disc_B.trainable_variables
-        disc_grads = tape.gradient(disc_A_loss + disc_B_loss, disc_vars)
-        optimizer_disc.apply_gradients(zip(disc_grads, disc_vars))
-        
-        del tape
-        
-        # Accumulate losses
-        epoc_loss_sum += total_loss
-        epoc_loss_est_sum += loss_est_source
-        epoc_loss_coral_sum += coral_loss
-        epoc_loss_cyclegan_sum += cyclegan_loss
+        # === Save features if required ===
+        if save_features:
+            # Save translated features for analysis
+            translated_A_numpy = translated_A.numpy()
+            translated_B_numpy = translated_B.numpy()
+            
+            if features_dataset_source is None:
+                features_dataset_source = features_h5_source.create_dataset(
+                    'features', data=translated_A_numpy,
+                    maxshape=(None,) + translated_A_numpy.shape[1:], chunks=True
+                )
+            else:
+                features_dataset_source.resize(features_dataset_source.shape[0] + translated_A_numpy.shape[0], axis=0)
+                features_dataset_source[-translated_A_numpy.shape[0]:] = translated_A_numpy
+                
+            if features_dataset_target is None:
+                features_dataset_target = features_h5_target.create_dataset(
+                    'features', data=translated_B_numpy,
+                    maxshape=(None,) + translated_B_numpy.shape[1:], chunks=True
+                )
+            else:
+                features_dataset_target.resize(features_dataset_target.shape[0] + translated_B_numpy.shape[0], axis=0)
+                features_dataset_target[-translated_B_numpy.shape[0]:] = translated_B_numpy
+
+        # === Track metrics ===
+        total_loss = (G_A2B_total_loss + G_B2A_total_loss) / 2  # Average generator loss
+        epoc_loss_total += total_loss.numpy() * x_src.shape[0]
+        epoc_loss_est += est_loss_A.numpy() * x_src.shape[0]           # Source estimation (main)
+        epoc_loss_est_target += est_loss_B.numpy() * x_tgt.shape[0]    # Target estimation (monitoring)
+        epoc_loss_cycle += cycle_consistency_loss.numpy() * x_src.shape[0]
+        epoc_loss_identity += identity_loss.numpy() * x_src.shape[0]
+        epoc_loss_discriminator += (D_A_loss + D_B_loss).numpy() / 2 * x_src.shape[0]
+
+    # Close feature files
+    if save_features:
+        features_h5_source.close()
+        features_h5_target.close()
     
-    # Return metrics (same structure as before)
-    return TrainStepOutput(
-        avg_epoc_loss=epoc_loss_sum / num_batches,
-        avg_epoc_loss_est=epoc_loss_est_sum / num_batches,
-        avg_epoc_loss_domain=epoc_loss_coral_sum / num_batches,
-        avg_epoc_loss_d=0.0,  # Not used with CORAL
-        avg_epoc_loss_est_target=0.0,  # Can't calculate without ground truth
-        avg_epoc_loss_cyclegan=epoc_loss_cyclegan_sum / num_batches  # New metric
+    # Calculate averages
+    avg_loss_total = epoc_loss_total / N_train
+    avg_loss_est = epoc_loss_est / N_train
+    avg_loss_est_target = epoc_loss_est_target / N_train
+    avg_loss_cycle = epoc_loss_cycle / N_train
+    avg_discriminator_loss = epoc_loss_discriminator / N_train
+    
+    # Print CycleGAN-specific statistics
+    print(f"    CycleGAN G_A2B loss: {avg_loss_total:.6f}")
+    print(f"    CycleGAN Cycle consistency: {avg_loss_cycle:.6f}")
+    print(f"    CycleGAN Discriminator loss: {avg_discriminator_loss:.6f}")
+    
+    # Return compatible structure
+    return train_step_Output(
+        avg_epoc_loss_est=avg_loss_est,                    # Average estimation performance
+        avg_epoc_loss_domain=avg_loss_cycle,               # Use cycle loss as "domain" loss
+        avg_epoc_loss=avg_loss_total,                      # Average generator loss
+        avg_epoc_loss_est_target=avg_loss_est_target,      # Target estimation quality
+        features_source=last_translated_A.numpy() if last_translated_A is not None else None,  # Translated source
+        film_features_source=last_translated_A.numpy() if last_translated_A is not None else None,
+        avg_epoc_loss_d=avg_discriminator_loss             # Average discriminator loss
     )
+
+    
+    
+    
