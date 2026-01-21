@@ -7104,7 +7104,993 @@ def train_step_cnn_residual_fda_rawThenScale(model_cnn, loader_H, loss_fn, optim
     )    
 
 
+##
+def train_step_cnn_residual_fda_jmmd_rawThenScale(model_cnn, loader_H, loss_fn, optimizer, lower_range=-1, 
+                                                save_features=False, nsymb=14, weights=None, linear_interp=False,
+                                                fda_win_h=13, fda_win_w=3, fda_weight=1.0, jmmd_loss_fn=None):
+    """
+    CNN-only residual training step combining RAW FDA input translation with JMMD feature alignment
+    
+    Workflow:
+    1. RAW FDA: Apply FDA directly on unscaled source and target inputs for input translation
+    2. Scale FDA output to [-1,1] and get its scaling parameters
+    3. Scale ground truth with FDA's scaling parameters
+    4. Dual flow: Raw target input + FDA-translated input → CNN → Extract features
+    5. JMMD alignment: Minimize feature distance between raw target and FDA-translated features
+    6. Residual learning: Train CNN to predict corrections
+    
+    Args:
+        model_cnn: CNN model (CNNGenerator instance)
+        loader_H: tuple of (loader_H_input_train_src, loader_H_true_train_src, 
+                        loader_H_input_train_tgt, loader_H_true_train_tgt)
+        loss_fn: tuple of loss functions (estimation_loss, bce_loss) - only first one used
+        optimizer: single optimizer for CNN
+        lower_range: lower range for min-max scaling
+        save_features: bool, whether to save features for PAD computation
+        nsymb: number of symbols
+        weights: weight dictionary
+        linear_interp: linear interpolation flag
+        fda_win_h: FDA window height for mixing (default 13)
+        fda_win_w: FDA window width for mixing (default 3) 
+        fda_weight: Weight for FDA vs source training (1.0 = 100% FDA)
+        jmmd_loss_fn: JMMD loss function instance (if None, will create default)
+    """
+    loader_H_input_train_src, loader_H_true_train_src, \
+        loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
+    loss_fn_est = loss_fn[0]  # Only need estimation loss
+    
+    est_weight = weights.get('est_weight', 1.0) if weights else 1.0
+    domain_weight = weights.get('domain_weight', 1.0) if weights else 1.0
+    temporal_weight = weights.get('temporal_weight', 0.0) if weights else 0.0
+    frequency_weight = weights.get('frequency_weight', 0.0) if weights else 0.0
+    
+    # Initialize JMMD loss if not provided
+    if jmmd_loss_fn is None:
+        jmmd_loss_fn = JMMDLossNormalized()
+    
+    epoc_loss_total = 0.0
+    epoc_loss_est = 0.0
+    epoc_loss_est_target = 0.0
+    epoc_loss_jmmd = 0.0
+    epoc_residual_norm = 0.0
+    epoc_fda_effect = 0.0
+    N_train = 0
+    
+    # Initialize feature variables
+    features_src = None
+    features_tgt_raw = None
+    features_tgt_fda = None
+    
+    if save_features and domain_weight != 0:
+        features_h5_path_source = 'features_source.h5'
+        if os.path.exists(features_h5_path_source):
+            os.remove(features_h5_path_source)
+        features_h5_source = h5py.File(features_h5_path_source, 'w')
+        features_dataset_source = None
+
+        features_h5_path_target = 'features_target.h5'
+        if os.path.exists(features_h5_path_target):
+            os.remove(features_h5_path_target)   
+        features_h5_target = h5py.File(features_h5_path_target, 'w')
+        features_dataset_target = None
+    
+    for batch_idx in range(loader_H_true_train_src.total_batches):
+        # Get data
+        x_src = loader_H_input_train_src.next_batch()
+        y_src = loader_H_true_train_src.next_batch()
+        x_tgt = loader_H_input_train_tgt.next_batch()
+        y_tgt = loader_H_true_train_tgt.next_batch()
+        N_train += x_src.shape[0]
+
+        # Preprocess data to real format (NO SCALING YET - RAW FDA)
+        x_src_real = complx2real(x_src)
+        y_src_real = complx2real(y_src)
+        x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
+        y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
+
+        x_tgt_real = complx2real(x_tgt)
+        y_tgt_real = complx2real(y_tgt)
+        x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
+        y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
+
+        # ============ STEP 1: RAW FDA INPUT TRANSLATION ============
+        # Convert raw data to complex for FDA
+        x_src_complex = tf.complex(x_src_real[:,:,:,0], x_src_real[:,:,:,1])
+        x_tgt_complex = tf.complex(x_tgt_real[:,:,:,0], x_tgt_real[:,:,:,1])
+        
+        # Extract Delay-Doppler representations from RAW data
+        src_amplitude, src_phase = F_extract_DD(x_src_complex)
+        tgt_amplitude, tgt_phase = F_extract_DD(x_tgt_complex)
+        
+        # Mix amplitudes: Target style in center, Source style in outer regions
+        mixed_amplitude = fda_mix_pixels(src_amplitude, tgt_amplitude, fda_win_h, fda_win_w)
+        
+        # Keep source phase (content preservation)
+        mixed_complex_dd = apply_phase_to_amplitude(mixed_amplitude, src_phase)
+        
+        # Convert back to Time-Frequency domain
+        x_fda_mixed_complex = F_inverse_DD(mixed_complex_dd)
+        
+        # Convert back to real format [batch, 132, 14, 2]
+        x_fda_mixed_real = tf.stack([tf.math.real(x_fda_mixed_complex), tf.math.imag(x_fda_mixed_complex)], axis=-1)
+        
+        # Track FDA mixing effect
+        fda_difference = tf.reduce_mean(tf.abs(x_fda_mixed_real - x_src_real))
+        epoc_fda_effect += fda_difference.numpy() * x_src.shape[0]
+        
+        # ============ STEP 2: SCALE FDA OUTPUT ============
+        # Scale FDA-mixed output to [-1,1] and get its scaling parameters
+        x_fda_mixed_numpy = x_fda_mixed_real.numpy()
+        x_fda_scaled, fda_min, fda_max = minmaxScaler(x_fda_mixed_numpy, lower_range=lower_range, linear_interp=linear_interp)
+        
+        # ============ STEP 3: SCALE TARGET INPUT SEPARATELY FOR DUAL FLOW ============
+        # Scale target input with its own parameters for the dual flow
+        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+        
+        # ============ STEP 4: SCALE GROUND TRUTH WITH FDA PARAMETERS ============
+        # Convert FDA scaling parameters to format expected by minmaxScaler
+        batch_size = y_src_real.shape[0]
+        
+        # Handle scalar vs array FDA parameters
+        if np.isscalar(fda_min):
+            fda_min_array = np.tile([[fda_min, fda_min]], (batch_size, 1))  # [batch_size, 2]
+            fda_max_array = np.tile([[fda_max, fda_max]], (batch_size, 1))  # [batch_size, 2]
+        else:
+            # If fda_min/fda_max are already arrays, use them directly
+            fda_min_array = fda_min if fda_min.shape == (batch_size, 2) else np.tile(fda_min, (batch_size, 1))
+            fda_max_array = fda_max if fda_max.shape == (batch_size, 2) else np.tile(fda_max, (batch_size, 1))
+        
+        # Scale source ground truth using FDA output's scaling parameters
+        y_scaled_with_fda_params, _, _ = minmaxScaler(y_src_real, min_pre=fda_min_array, max_pre=fda_max_array, 
+                                                    lower_range=lower_range, linear_interp=linear_interp)
+        
+        # Also scale source input with FDA parameters for consistency (for hybrid training)
+        x_src_scaled_with_fda_params, _, _ = minmaxScaler(x_src_real, min_pre=fda_min_array, max_pre=fda_max_array, 
+                                                        lower_range=lower_range, linear_interp=linear_interp)
+
+        # === DUAL FLOW FEATURE EXTRACTION + TRAINING ===
+        with tf.GradientTape() as tape:
+            # === FLOW 1: FDA-TRANSLATED INPUT (Main training flow) ===
+            residual_fda, features_tgt_fda = model_cnn(x_fda_scaled, training=True, return_features=True)
+            x_corrected_fda = x_fda_scaled + residual_fda
+            
+            # === FLOW 2: RAW TARGET INPUT (Alignment flow for JMMD) ===
+            # Use target's own scaling for consistency with validation
+            residual_tgt_raw, features_tgt_raw = model_cnn(x_scaled_tgt, training=False, return_features=True)
+            # Note: training=False to prevent this flow from affecting main training gradients
+            
+            # === FLOW 3: SOURCE INPUT (Hybrid training if needed) ===
+            if fda_weight < 1.0:
+                residual_src, features_src = model_cnn(x_src_scaled_with_fda_params, training=True, return_features=True)
+                x_corrected_src = x_src_scaled_with_fda_params + residual_src
+            else:
+                features_src = features_tgt_fda  # Use FDA features as source features
+            
+            # === ESTIMATION LOSS ===
+            if fda_weight < 1.0:
+                # Hybrid training: FDA + Source
+                batch_size_int = x_fda_scaled.shape[0]
+                fda_samples = int(batch_size_int * fda_weight)
+                
+                if fda_samples > 0 and (batch_size_int - fda_samples) > 0:
+                    # Mixed batch: Part FDA, part source
+                    est_loss_fda = loss_fn_est(y_scaled_with_fda_params[:fda_samples], x_corrected_fda[:fda_samples])
+                    est_loss_src = loss_fn_est(y_scaled_with_fda_params[fda_samples:], x_corrected_src[fda_samples:])
+                    est_loss = (fda_weight * est_loss_fda + (1 - fda_weight) * est_loss_src)
+                    
+                    # Combined residual for regularization
+                    residual_combined = tf.concat([residual_fda[:fda_samples], residual_src[fda_samples:]], axis=0)
+                elif fda_samples == 0:
+                    # Pure source
+                    est_loss = loss_fn_est(y_scaled_with_fda_params, x_corrected_src)
+                    residual_combined = residual_src
+                else:
+                    # Pure FDA
+                    est_loss = loss_fn_est(y_scaled_with_fda_params, x_corrected_fda)
+                    residual_combined = residual_fda
+            else:
+                # Pure FDA training
+                est_loss = loss_fn_est(y_scaled_with_fda_params, x_corrected_fda)
+                residual_combined = residual_fda
+            
+            # === JMMD LOSS: Align Raw Target and FDA-Translated Features ===
+            # This encourages the model to extract similar features from both raw target and FDA-translated inputs
+            jmmd_loss = jmmd_loss_fn(features_tgt_raw, features_tgt_fda)
+            
+            # === REGULARIZATION LOSSES ===
+            residual_reg = 0.001 * tf.reduce_mean(tf.square(residual_combined))
+            
+            # Smoothness loss
+            if temporal_weight != 0 or frequency_weight != 0:
+                if fda_weight < 1.0 and fda_samples > 0 and (batch_size_int - fda_samples) > 0:
+                    smoothness_fda = compute_total_smoothness_loss(x_corrected_fda[:fda_samples], 
+                                                                temporal_weight=temporal_weight, 
+                                                                frequency_weight=frequency_weight)
+                    smoothness_src = compute_total_smoothness_loss(x_corrected_src[fda_samples:], 
+                                                                temporal_weight=temporal_weight, 
+                                                                frequency_weight=frequency_weight)
+                    smoothness_loss = (smoothness_fda + smoothness_src) / 2
+                else:
+                    smoothness_loss = compute_total_smoothness_loss(x_corrected_fda, 
+                                                                temporal_weight=temporal_weight, 
+                                                                frequency_weight=frequency_weight)
+            else:
+                smoothness_loss = 0.0
+            
+            # === TOTAL LOSS ===
+            total_loss = (est_weight * est_loss + 
+                        domain_weight * jmmd_loss +      # FDA-JMMD alignment loss
+                        residual_reg + 
+                        smoothness_loss)
+            
+            # Add L2 regularization from model
+            if model_cnn.losses:
+                total_loss += tf.add_n(model_cnn.losses)
+
+        # === MONITOR TARGET PERFORMANCE (separate target evaluation) ===
+        y_scaled_tgt, _, _ = minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+        x_corrected_tgt_raw = x_scaled_tgt + residual_tgt_raw
+        est_loss_tgt = loss_fn_est(y_scaled_tgt, x_corrected_tgt_raw)
+        epoc_loss_est_target += est_loss_tgt.numpy() * x_tgt.shape[0]
+        
+        # === SAVE FEATURES IF REQUIRED ===
+        if save_features and domain_weight != 0:
+            # Save FDA-translated features
+            features_np_fda = features_tgt_fda[-1].numpy()
+            if features_dataset_source is None:
+                features_dataset_source = features_h5_source.create_dataset(
+                    'features', data=features_np_fda,
+                    maxshape=(None,) + features_np_fda.shape[1:], chunks=True
+                )
+            else:
+                features_dataset_source.resize(features_dataset_source.shape[0] + features_np_fda.shape[0], axis=0)
+                features_dataset_source[-features_np_fda.shape[0]:] = features_np_fda
+                
+            # Save raw target features
+            features_np_raw = features_tgt_raw[-1].numpy()
+            if features_dataset_target is None:
+                features_dataset_target = features_h5_target.create_dataset(
+                    'features', data=features_np_raw,
+                    maxshape=(None,) + features_np_raw.shape[1:], chunks=True
+                )
+            else:
+                features_dataset_target.resize(features_dataset_target.shape[0] + features_np_raw.shape[0], axis=0)
+                features_dataset_target[-features_np_raw.shape[0]:] = features_np_raw
+        
+        # Update model
+        grads = tape.gradient(total_loss, model_cnn.trainable_variables)
+        optimizer.apply_gradients(zip(grads, model_cnn.trainable_variables))
+        
+        # Track metrics
+        epoc_loss_total += total_loss.numpy() * x_src.shape[0]
+        epoc_loss_est += est_loss.numpy() * x_src.shape[0]
+        epoc_loss_jmmd += jmmd_loss.numpy() * x_src.shape[0]
+        epoc_residual_norm += tf.reduce_mean(tf.abs(residual_combined)).numpy() * x_src.shape[0]
+    
+    # Close feature files
+    if save_features and domain_weight != 0:
+        features_h5_source.close()
+        features_h5_target.close()
+    
+    # Calculate averages
+    avg_loss_total = epoc_loss_total / N_train
+    avg_loss_est = epoc_loss_est / N_train
+    avg_loss_est_target = epoc_loss_est_target / N_train
+    avg_loss_jmmd = epoc_loss_jmmd / N_train
+    avg_residual_norm = epoc_residual_norm / N_train
+    avg_fda_effect = epoc_fda_effect / N_train
+    
+    # Print enhanced statistics
+    print(f"    RAW FDA + JMMD residual norm (avg): {avg_residual_norm:.6f}")
+    print(f"    RAW FDA + JMMD alignment loss: {avg_loss_jmmd:.6f}")
+    print(f"    RAW FDA mixing effect: {avg_fda_effect:.6f}")
+    print(f"    FDA window: {fda_win_h}x{fda_win_w}, weight: {fda_weight}")
+    
+    # Return compatible structure
+    return train_step_Output(
+        avg_epoc_loss_est=avg_loss_est,
+        avg_epoc_loss_domain=avg_loss_jmmd,               # RAW FDA-JMMD alignment loss
+        avg_epoc_loss=avg_loss_total,
+        avg_epoc_loss_est_target=avg_loss_est_target,
+        features_source=features_tgt_fda[-1] if features_tgt_fda is not None else None,
+        film_features_source=features_tgt_fda[-1] if features_tgt_fda is not None else None,
+        avg_epoc_loss_d=0.0  # No discriminator
+    )
+    
 #
+def train_step_cnn_residual_fda_jmmd_rawThenScale_domainAware(model_cnn, loader_H, loss_fn, optimizer, lower_range=-1, 
+                                                            save_features=False, nsymb=14, weights=None, linear_interp=False,
+                                                            fda_win_h=13, fda_win_w=3, fda_weight=1.0, jmmd_loss_fn=None,
+                                                            consistency_weight=0.3, residual_consistency_weight=0.2,
+                                                            improvement_consistency_weight=0.1):
+    """
+    CNN-only residual training step combining RAW FDA input translation, JMMD feature alignment, 
+    and domain-aware consistency for robust residual learning
+    
+    Workflow:
+    1. RAW FDA: Apply FDA directly on unscaled source and target inputs for input translation
+    2. Scale FDA output to [-1,1] and get its scaling parameters
+    3. Scale ground truth with FDA's scaling parameters
+    4. Dual flow: Raw target input + FDA-translated input → CNN → Extract features
+    5. JMMD alignment: Minimize feature distance between raw target and FDA-translated features
+    6. Domain-aware consistency: Similar improvement ratios across domains
+    7. Residual pattern consistency: Similar residual correction patterns (relative to input magnitude)
+    8. Residual learning: Train CNN to predict corrections
+    
+    Args:
+        consistency_weight: Weight for improvement ratio consistency (default 0.3)
+        residual_consistency_weight: Weight for residual pattern consistency (default 0.2)
+        improvement_consistency_weight: Weight for improvement percentage consistency (default 0.1)
+    """
+    loader_H_input_train_src, loader_H_true_train_src, \
+        loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
+    loss_fn_est = loss_fn[0]  # Only need estimation loss
+    
+    est_weight = weights.get('est_weight', 1.0) if weights else 1.0
+    domain_weight = weights.get('domain_weight', 1.0) if weights else 1.0
+    temporal_weight = weights.get('temporal_weight', 0.0) if weights else 0.0
+    frequency_weight = weights.get('frequency_weight', 0.0) if weights else 0.0
+    
+    # Initialize JMMD loss if not provided
+    if jmmd_loss_fn is None:
+        jmmd_loss_fn = JMMDLossNormalized()
+    
+    epoc_loss_total = 0.0
+    epoc_loss_est = 0.0
+    epoc_loss_est_target = 0.0
+    epoc_loss_jmmd = 0.0
+    epoc_loss_domain_aware_consistency = 0.0  # Track domain-aware consistency
+    epoc_loss_residual_consistency = 0.0      # Track residual pattern consistency
+    epoc_loss_improvement_consistency = 0.0   # Track improvement percentage consistency
+    epoc_residual_norm = 0.0
+    epoc_fda_effect = 0.0
+    N_train = 0
+    
+    # Initialize feature variables
+    features_src = None
+    features_tgt_raw = None
+    features_tgt_fda = None
+    
+    if save_features and domain_weight != 0:
+        features_h5_path_source = 'features_source.h5'
+        if os.path.exists(features_h5_path_source):
+            os.remove(features_h5_path_source)
+        features_h5_source = h5py.File(features_h5_path_source, 'w')
+        features_dataset_source = None
+
+        features_h5_path_target = 'features_target.h5'
+        if os.path.exists(features_h5_path_target):
+            os.remove(features_h5_path_target)   
+        features_h5_target = h5py.File(features_h5_path_target, 'w')
+        features_dataset_target = None
+    
+    for batch_idx in range(loader_H_true_train_src.total_batches):
+        # Get data
+        x_src = loader_H_input_train_src.next_batch()
+        y_src = loader_H_true_train_src.next_batch()
+        x_tgt = loader_H_input_train_tgt.next_batch()
+        y_tgt = loader_H_true_train_tgt.next_batch()
+        N_train += x_src.shape[0]
+
+        # Preprocess data to real format (NO SCALING YET - RAW FDA)
+        x_src_real = complx2real(x_src)
+        y_src_real = complx2real(y_src)
+        x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
+        y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
+
+        x_tgt_real = complx2real(x_tgt)
+        y_tgt_real = complx2real(y_tgt)
+        x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
+        y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
+
+        # ============ STEP 1: RAW FDA INPUT TRANSLATION ============
+        # Convert raw data to complex for FDA
+        x_src_complex = tf.complex(x_src_real[:,:,:,0], x_src_real[:,:,:,1])
+        x_tgt_complex = tf.complex(x_tgt_real[:,:,:,0], x_tgt_real[:,:,:,1])
+        
+        # Extract Delay-Doppler representations from RAW data
+        src_amplitude, src_phase = F_extract_DD(x_src_complex)
+        tgt_amplitude, tgt_phase = F_extract_DD(x_tgt_complex)
+        
+        # Mix amplitudes: Target style in center, Source style in outer regions
+        mixed_amplitude = fda_mix_pixels(src_amplitude, tgt_amplitude, fda_win_h, fda_win_w)
+        
+        # Keep source phase (content preservation)
+        mixed_complex_dd = apply_phase_to_amplitude(mixed_amplitude, src_phase)
+        
+        # Convert back to Time-Frequency domain
+        x_fda_mixed_complex = F_inverse_DD(mixed_complex_dd)
+        
+        # Convert back to real format [batch, 132, 14, 2]
+        x_fda_mixed_real = tf.stack([tf.math.real(x_fda_mixed_complex), tf.math.imag(x_fda_mixed_complex)], axis=-1)
+        
+        # Track FDA mixing effect
+        fda_difference = tf.reduce_mean(tf.abs(x_fda_mixed_real - x_src_real))
+        epoc_fda_effect += fda_difference.numpy() * x_src.shape[0]
+        
+        # ============ STEP 2: SCALE FDA OUTPUT ============
+        # Scale FDA-mixed output to [-1,1] and get its scaling parameters
+        x_fda_mixed_numpy = x_fda_mixed_real.numpy()
+        x_fda_scaled, fda_min, fda_max = minmaxScaler(x_fda_mixed_numpy, lower_range=lower_range, linear_interp=linear_interp)
+        
+        # ============ STEP 3: SCALE TARGET INPUT SEPARATELY FOR DUAL FLOW ============
+        # Scale target input with its own parameters for the dual flow
+        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+        
+        # ============ STEP 4: SCALE GROUND TRUTH WITH FDA PARAMETERS ============
+        # Convert FDA scaling parameters to format expected by minmaxScaler
+        batch_size = y_src_real.shape[0]
+        
+        # Handle scalar vs array FDA parameters
+        if np.isscalar(fda_min):
+            fda_min_array = np.tile([[fda_min, fda_min]], (batch_size, 1))
+            fda_max_array = np.tile([[fda_max, fda_max]], (batch_size, 1))
+        else:
+            fda_min_array = fda_min if fda_min.shape == (batch_size, 2) else np.tile(fda_min, (batch_size, 1))
+            fda_max_array = fda_max if fda_max.shape == (batch_size, 2) else np.tile(fda_max, (batch_size, 1))
+        
+        # Scale source ground truth using FDA output's scaling parameters
+        y_scaled_with_fda_params, _, _ = minmaxScaler(y_src_real, min_pre=fda_min_array, max_pre=fda_max_array, 
+                                                    lower_range=lower_range, linear_interp=linear_interp)
+        
+        # Also scale source input with FDA parameters for consistency (for hybrid training)
+        x_src_scaled_with_fda_params, _, _ = minmaxScaler(x_src_real, min_pre=fda_min_array, max_pre=fda_max_array, 
+                                                        lower_range=lower_range, linear_interp=linear_interp)
+
+        # === DUAL FLOW FEATURE EXTRACTION + TRAINING + DOMAIN-AWARE CONSISTENCY ===
+        with tf.GradientTape() as tape:
+            # === FLOW 1: FDA-TRANSLATED INPUT (Main training flow) ===
+            residual_fda, features_tgt_fda = model_cnn(x_fda_scaled, training=True, return_features=True)
+            x_corrected_fda = x_fda_scaled + residual_fda
+            
+            # === FLOW 2: RAW TARGET INPUT (Alignment flow for JMMD) ===
+            residual_tgt_raw, features_tgt_raw = model_cnn(x_scaled_tgt, training=False, return_features=True)
+            x_corrected_tgt_raw = x_scaled_tgt + residual_tgt_raw
+            # Note: training=False to prevent this flow from affecting main training gradients
+            
+            # === FLOW 3: SOURCE INPUT (Hybrid training if needed) ===
+            if fda_weight < 1.0:
+                residual_src, features_src = model_cnn(x_src_scaled_with_fda_params, training=True, return_features=True)
+                x_corrected_src = x_src_scaled_with_fda_params + residual_src
+            else:
+                features_src = features_tgt_fda  # Use FDA features as source features
+            
+            # === ESTIMATION LOSS ===
+            if fda_weight < 1.0:
+                # Hybrid training: FDA + Source
+                batch_size_int = x_fda_scaled.shape[0]
+                fda_samples = int(batch_size_int * fda_weight)
+                
+                if fda_samples > 0 and (batch_size_int - fda_samples) > 0:
+                    est_loss_fda = loss_fn_est(y_scaled_with_fda_params[:fda_samples], x_corrected_fda[:fda_samples])
+                    est_loss_src = loss_fn_est(y_scaled_with_fda_params[fda_samples:], x_corrected_src[fda_samples:])
+                    est_loss = (fda_weight * est_loss_fda + (1 - fda_weight) * est_loss_src)
+                    
+                    residual_combined = tf.concat([residual_fda[:fda_samples], residual_src[fda_samples:]], axis=0)
+                elif fda_samples == 0:
+                    est_loss = loss_fn_est(y_scaled_with_fda_params, x_corrected_src)
+                    residual_combined = residual_src
+                else:
+                    est_loss = loss_fn_est(y_scaled_with_fda_params, x_corrected_fda)
+                    residual_combined = residual_fda
+            else:
+                # Pure FDA training
+                est_loss = loss_fn_est(y_scaled_with_fda_params, x_corrected_fda)
+                residual_combined = residual_fda
+            
+            # === JMMD LOSS: Align Raw Target and FDA-Translated Features ===
+            jmmd_loss = jmmd_loss_fn(features_tgt_raw, features_tgt_fda)
+            
+            # === DOMAIN-AWARE CONSISTENCY LOSSES (NEW!) ===
+            # Note: For consistency calculation, we need target ground truth scaled with target's own parameters
+            y_scaled_tgt, _, _ = minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+            
+            # 1. IMPROVEMENT RATIO CONSISTENCY (Main domain-aware consistency)
+            if improvement_consistency_weight > 0:
+                # Calculate improvement ratios for both domains
+                # FDA domain: input error vs corrected error
+                fda_input_error = tf.reduce_mean(tf.abs(x_fda_scaled - y_scaled_with_fda_params), axis=[1,2,3])
+                fda_corrected_error = tf.reduce_mean(tf.abs(x_corrected_fda - y_scaled_with_fda_params), axis=[1,2,3])
+                fda_improvement = (fda_input_error - fda_corrected_error) / (fda_input_error + 1e-8)
+                
+                # Target domain: input error vs corrected error
+                tgt_input_error = tf.reduce_mean(tf.abs(x_scaled_tgt - y_scaled_tgt), axis=[1,2,3])
+                tgt_corrected_error = tf.reduce_mean(tf.abs(x_corrected_tgt_raw - y_scaled_tgt), axis=[1,2,3])
+                tgt_improvement = (tgt_input_error - tgt_corrected_error) / (tgt_input_error + 1e-8)
+                
+                # Consistency: similar improvement percentages
+                improvement_consistency_loss = tf.reduce_mean(tf.square(fda_improvement - tgt_improvement))
+            else:
+                improvement_consistency_loss = 0.0
+            
+            # 2. RESIDUAL PATTERN CONSISTENCY (Perfect for your residual learning!)
+            if residual_consistency_weight > 0:
+                # Normalize residuals by input magnitude to account for domain differences
+                fda_input_magnitude = tf.abs(x_fda_scaled) + 1e-8
+                tgt_input_magnitude = tf.abs(x_scaled_tgt) + 1e-8
+                
+                # Normalized residual patterns
+                fda_residual_normalized = residual_fda / fda_input_magnitude
+                tgt_residual_normalized = residual_tgt_raw / tgt_input_magnitude
+                
+                # Consistency: similar relative correction patterns
+                residual_pattern_consistency = tf.reduce_mean(tf.square(fda_residual_normalized - tgt_residual_normalized))
+            else:
+                residual_pattern_consistency = 0.0
+            
+            # 3. DIRECT CONSISTENCY (Traditional approach, optional)
+            if consistency_weight > 0:
+                # Direct output consistency (less suitable for your case but included for completeness)
+                batch_size_tensor = tf.shape(x_fda_scaled)[0]
+                min_batch_size = tf.minimum(batch_size_tensor, tf.shape(x_scaled_tgt)[0])
+                
+                # Take subset for consistency calculation
+                fda_subset = x_corrected_fda[:min_batch_size]
+                tgt_subset = x_corrected_tgt_raw[:min_batch_size]
+                
+                # Normalize by respective input magnitudes for fair comparison
+                fda_input_ref = tf.abs(x_fda_scaled[:min_batch_size]) + 1e-8
+                tgt_input_ref = tf.abs(x_scaled_tgt[:min_batch_size]) + 1e-8
+                
+                fda_normalized = fda_subset / fda_input_ref
+                tgt_normalized = tgt_subset / tgt_input_ref
+                
+                direct_consistency_loss = tf.reduce_mean(tf.square(fda_normalized - tgt_normalized))
+            else:
+                direct_consistency_loss = 0.0
+            
+            # === REGULARIZATION LOSSES ===
+            residual_reg = 0.001 * tf.reduce_mean(tf.square(residual_combined))
+            
+            # Smoothness loss
+            if temporal_weight != 0 or frequency_weight != 0:
+                if fda_weight < 1.0 and fda_samples > 0 and (batch_size_int - fda_samples) > 0:
+                    smoothness_fda = compute_total_smoothness_loss(x_corrected_fda[:fda_samples], 
+                                                                temporal_weight=temporal_weight, 
+                                                                frequency_weight=frequency_weight)
+                    smoothness_src = compute_total_smoothness_loss(x_corrected_src[fda_samples:], 
+                                                                temporal_weight=temporal_weight, 
+                                                                frequency_weight=frequency_weight)
+                    smoothness_loss = (smoothness_fda + smoothness_src) / 2
+                else:
+                    smoothness_loss = compute_total_smoothness_loss(x_corrected_fda, 
+                                                                temporal_weight=temporal_weight, 
+                                                                frequency_weight=frequency_weight)
+            else:
+                smoothness_loss = 0.0
+            
+            # === TOTAL LOSS (WITH DOMAIN-AWARE CONSISTENCY) ===
+            total_loss = (est_weight * est_loss + 
+                        domain_weight * jmmd_loss +                              # Feature alignment
+                        improvement_consistency_weight * improvement_consistency_loss +  # NEW: Improvement ratio consistency
+                        residual_consistency_weight * residual_pattern_consistency +    # NEW: Residual pattern consistency  
+                        consistency_weight * direct_consistency_loss +                  # NEW: Direct consistency (optional)
+                        residual_reg + 
+                        smoothness_loss)
+            
+            # Add L2 regularization from model
+            if model_cnn.losses:
+                total_loss += tf.add_n(model_cnn.losses)
+
+        # === MONITOR TARGET PERFORMANCE (separate target evaluation) ===
+        est_loss_tgt = loss_fn_est(y_scaled_tgt, x_corrected_tgt_raw)
+        epoc_loss_est_target += est_loss_tgt.numpy() * x_tgt.shape[0]
+        
+        # === SAVE FEATURES IF REQUIRED ===
+        if save_features and domain_weight != 0:
+            # Save FDA-translated features
+            features_np_fda = features_tgt_fda[-1].numpy()
+            if features_dataset_source is None:
+                features_dataset_source = features_h5_source.create_dataset(
+                    'features', data=features_np_fda,
+                    maxshape=(None,) + features_np_fda.shape[1:], chunks=True
+                )
+            else:
+                features_dataset_source.resize(features_dataset_source.shape[0] + features_np_fda.shape[0], axis=0)
+                features_dataset_source[-features_np_fda.shape[0]:] = features_np_fda
+                
+            # Save raw target features
+            features_np_raw = features_tgt_raw[-1].numpy()
+            if features_dataset_target is None:
+                features_dataset_target = features_h5_target.create_dataset(
+                    'features', data=features_np_raw,
+                    maxshape=(None,) + features_np_raw.shape[1:], chunks=True
+                )
+            else:
+                features_dataset_target.resize(features_dataset_target.shape[0] + features_np_raw.shape[0], axis=0)
+                features_dataset_target[-features_np_raw.shape[0]:] = features_np_raw
+        
+        # Update model
+        grads = tape.gradient(total_loss, model_cnn.trainable_variables)
+        optimizer.apply_gradients(zip(grads, model_cnn.trainable_variables))
+        
+        # Track metrics
+        epoc_loss_total += total_loss.numpy() * x_src.shape[0]
+        epoc_loss_est += est_loss.numpy() * x_src.shape[0]
+        epoc_loss_jmmd += jmmd_loss.numpy() * x_src.shape[0]
+        epoc_loss_domain_aware_consistency += improvement_consistency_loss.numpy() * x_src.shape[0]  # Track new consistency
+        epoc_loss_residual_consistency += residual_pattern_consistency.numpy() * x_src.shape[0]      # Track residual consistency
+        epoc_loss_improvement_consistency += direct_consistency_loss.numpy() * x_src.shape[0]        # Track direct consistency
+        epoc_residual_norm += tf.reduce_mean(tf.abs(residual_combined)).numpy() * x_src.shape[0]
+    
+    # Close feature files
+    if save_features and domain_weight != 0:
+        features_h5_source.close()
+        features_h5_target.close()
+    
+    # Calculate averages
+    avg_loss_total = epoc_loss_total / N_train
+    avg_loss_est = epoc_loss_est / N_train
+    avg_loss_est_target = epoc_loss_est_target / N_train
+    avg_loss_jmmd = epoc_loss_jmmd / N_train
+    avg_loss_domain_aware_consistency = epoc_loss_domain_aware_consistency / N_train  # New metric
+    avg_loss_residual_consistency = epoc_loss_residual_consistency / N_train          # New metric
+    avg_loss_improvement_consistency = epoc_loss_improvement_consistency / N_train     # New metric
+    avg_residual_norm = epoc_residual_norm / N_train
+    avg_fda_effect = epoc_fda_effect / N_train
+    
+    # Print enhanced statistics with new consistency metrics
+    print(f"    RAW FDA + JMMD + Domain-Aware residual norm (avg): {avg_residual_norm:.6f}")
+    print(f"    RAW FDA + JMMD alignment loss: {avg_loss_jmmd:.6f}")
+    print(f"    Improvement ratio consistency: {avg_loss_domain_aware_consistency:.6f}")  # NEW
+    print(f"    Residual pattern consistency: {avg_loss_residual_consistency:.6f}")      # NEW  
+    print(f"    Direct consistency: {avg_loss_improvement_consistency:.6f}")             # NEW
+    print(f"    RAW FDA mixing effect: {avg_fda_effect:.6f}")
+    print(f"    FDA window: {fda_win_h}x{fda_win_w}, weight: {fda_weight}")
+    
+    # Return compatible structure
+    return train_step_Output(
+        avg_epoc_loss_est=avg_loss_est,
+        avg_epoc_loss_domain=avg_loss_jmmd + avg_loss_domain_aware_consistency + avg_loss_residual_consistency,  # Combined domain losses
+        avg_epoc_loss=avg_loss_total,
+        avg_epoc_loss_est_target=avg_loss_est_target,
+        features_source=features_tgt_fda[-1] if features_tgt_fda is not None else None,
+        film_features_source=features_tgt_fda[-1] if features_tgt_fda is not None else None,
+        avg_epoc_loss_d=0.0  # No discriminator
+    )
+
+# 
+def val_step_cnn_residual_fda_jmmd_rawThenScale_domainAware(model_cnn, loader_H, loss_fn, lower_range, nsymb=14, 
+                                                        weights=None, linear_interp=False, return_H_gen=False,
+                                                        fda_win_h=13, fda_win_w=3, fda_weight=1.0, jmmd_loss_fn=None,
+                                                        consistency_weight=0.3, residual_consistency_weight=0.2,
+                                                        improvement_consistency_weight=0.1):
+    """
+    Validation step for CNN-only residual learning with RAW FDA + JMMD + Domain-Aware Consistency
+    
+    Validates model performance using direct application to source and target inputs (no FDA translation during validation)
+    Calculates domain-aware consistency metrics for monitoring training effectiveness
+    
+    Args:
+        model_cnn: CNN model (CNNGenerator instance)
+        loader_H: tuple of validation loaders (input_src, true_src, input_tgt, true_tgt)
+        loss_fn: tuple of loss functions (only first one used)
+        lower_range: lower range for min-max scaling
+        nsymb: number of symbols
+        weights: weight dictionary
+        linear_interp: linear interpolation flag
+        return_H_gen: whether to return generated H matrices
+        fda_win_h: FDA window height (for optional FDA validation test)
+        fda_win_w: FDA window width (for optional FDA validation test)
+        fda_weight: FDA weight (for compatibility)
+        jmmd_loss_fn: JMMD loss function instance
+        consistency_weight: Weight for direct consistency (for monitoring)
+        residual_consistency_weight: Weight for residual pattern consistency (for monitoring)
+        improvement_consistency_weight: Weight for improvement ratio consistency (for monitoring)
+    """
+    loader_H_input_val_source, loader_H_true_val_source, loader_H_input_val_target, loader_H_true_val_target = loader_H
+    loss_fn_est = loss_fn[0]  # Only need estimation loss
+    
+    est_weight = weights.get('est_weight', 1.0) if weights else 1.0
+    domain_weight = weights.get('domain_weight', 1.0) if weights else 1.0
+    temporal_weight = weights.get('temporal_weight', 0.0) if weights else 0.0
+    frequency_weight = weights.get('frequency_weight', 0.0) if weights else 0.0
+    
+    # Initialize JMMD loss if not provided
+    if jmmd_loss_fn is None:
+        jmmd_loss_fn = JMMDLossNormalized()
+    
+    N_val_source = 0
+    N_val_target = 0
+    epoc_loss_est_source = 0.0
+    epoc_loss_est_target = 0.0
+    epoc_nmse_val_source = 0.0
+    epoc_nmse_val_target = 0.0
+    epoc_jmmd_loss = 0.0
+    epoc_smoothness_loss = 0.0
+    epoc_residual_norm = 0.0
+    
+    # Domain-aware consistency tracking
+    epoc_improvement_consistency = 0.0
+    epoc_residual_consistency = 0.0
+    epoc_direct_consistency = 0.0
+    
+    H_sample = []
+    
+    if return_H_gen:
+        all_H_gen_src = []
+        all_H_gen_tgt = []
+
+    for idx in range(loader_H_true_val_source.total_batches):
+        # Get and preprocess data (same as training)
+        x_src = loader_H_input_val_source.next_batch()
+        y_src = loader_H_true_val_source.next_batch()
+        x_tgt = loader_H_input_val_target.next_batch()
+        y_tgt = loader_H_true_val_target.next_batch()
+        N_val_source += x_src.shape[0]
+        N_val_target += x_tgt.shape[0]
+
+        # Preprocessing (same as training)
+        x_src_real = complx2real(x_src)
+        y_src_real = complx2real(y_src)
+        x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
+        y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = minmaxScaler(y_src_real, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+
+        x_tgt_real = complx2real(x_tgt)
+        y_tgt_real = complx2real(y_tgt)
+        x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
+        y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
+        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_tgt, _, _ = minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+
+        # === RESIDUAL LEARNING: Source domain prediction ===
+        residual_src, features_src = model_cnn(x_scaled_src, training=False, return_features=True)
+        preds_src = x_scaled_src + residual_src  # Apply residual correction
+        
+        # Safe tensor conversion
+        if hasattr(preds_src, 'numpy'):
+            preds_src_numpy = preds_src.numpy()
+        else:
+            preds_src_numpy = preds_src
+        
+        preds_src_descaled = deMinMax(preds_src_numpy, x_min_src, x_max_src, lower_range=lower_range)
+        batch_est_loss_source = loss_fn_est(y_scaled_src, preds_src).numpy()
+        epoc_loss_est_source += batch_est_loss_source * x_src.shape[0]
+        mse_val_source = np.mean((preds_src_descaled - y_src_real) ** 2, axis=(1, 2, 3))
+        power_source = np.mean(y_src_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_source += np.mean(mse_val_source / (power_source + 1e-30)) * x_src.shape[0]
+
+        # === RESIDUAL LEARNING: Target domain prediction ===
+        residual_tgt, features_tgt = model_cnn(x_scaled_tgt, training=False, return_features=True)
+        preds_tgt = x_scaled_tgt + residual_tgt  # Apply residual correction
+        
+        # Safe tensor conversion
+        if hasattr(preds_tgt, 'numpy'):
+            preds_tgt_numpy = preds_tgt.numpy()
+        else:
+            preds_tgt_numpy = preds_tgt
+            
+        preds_tgt_descaled = deMinMax(preds_tgt_numpy, x_min_tgt, x_max_tgt, lower_range=lower_range)
+        batch_est_loss_target = loss_fn_est(y_scaled_tgt, preds_tgt).numpy()
+        epoc_loss_est_target += batch_est_loss_target * x_tgt.shape[0]
+        mse_val_target = np.mean((preds_tgt_descaled - y_tgt_real) ** 2, axis=(1, 2, 3))
+        power_target = np.mean(y_tgt_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_target += np.mean(mse_val_target / (power_target + 1e-30)) * x_tgt.shape[0]
+
+        # Track residual magnitudes during validation
+        residual_src_norm = tf.reduce_mean(tf.square(residual_src)).numpy()
+        residual_tgt_norm = tf.reduce_mean(tf.square(residual_tgt)).numpy()
+        epoc_residual_norm += (residual_src_norm + residual_tgt_norm) / 2 * x_src.shape[0]
+
+        # === JMMD Loss (on features for monitoring) ===
+        if domain_weight > 0:
+            jmmd_loss = jmmd_loss_fn(features_src, features_tgt)
+            epoc_jmmd_loss += jmmd_loss.numpy() * x_src.shape[0]
+        
+        # === DOMAIN-AWARE CONSISTENCY METRICS (FOR MONITORING) ===
+        
+        # 1. IMPROVEMENT RATIO CONSISTENCY
+        if improvement_consistency_weight > 0:
+            # Source domain improvement ratio
+            src_input_error = tf.reduce_mean(tf.abs(x_scaled_src - y_scaled_src), axis=[1,2,3])
+            src_corrected_error = tf.reduce_mean(tf.abs(preds_src - y_scaled_src), axis=[1,2,3])
+            src_improvement = (src_input_error - src_corrected_error) / (src_input_error + 1e-8)
+            
+            # Target domain improvement ratio
+            tgt_input_error = tf.reduce_mean(tf.abs(x_scaled_tgt - y_scaled_tgt), axis=[1,2,3])
+            tgt_corrected_error = tf.reduce_mean(tf.abs(preds_tgt - y_scaled_tgt), axis=[1,2,3])
+            tgt_improvement = (tgt_input_error - tgt_corrected_error) / (tgt_input_error + 1e-8)
+            
+            # Consistency metric: How similar are improvement ratios?
+            improvement_consistency = tf.reduce_mean(tf.square(src_improvement - tgt_improvement))
+            epoc_improvement_consistency += improvement_consistency.numpy() * x_src.shape[0]
+        
+        # 2. RESIDUAL PATTERN CONSISTENCY
+        if residual_consistency_weight > 0:
+            # Normalize residuals by input magnitude
+            src_input_magnitude = tf.abs(x_scaled_src) + 1e-8
+            tgt_input_magnitude = tf.abs(x_scaled_tgt) + 1e-8
+            
+            src_residual_normalized = residual_src / src_input_magnitude
+            tgt_residual_normalized = residual_tgt / tgt_input_magnitude
+            
+            # Consistency metric: How similar are relative correction patterns?
+            residual_pattern_consistency = tf.reduce_mean(tf.square(src_residual_normalized - tgt_residual_normalized))
+            epoc_residual_consistency += residual_pattern_consistency.numpy() * x_src.shape[0]
+        
+        # 3. DIRECT OUTPUT CONSISTENCY (OPTIONAL)
+        if consistency_weight > 0:
+            # Direct output consistency (less suitable but included for completeness)
+            batch_size_tensor = tf.shape(x_scaled_src)[0]
+            min_batch_size = tf.minimum(batch_size_tensor, tf.shape(x_scaled_tgt)[0])
+            
+            # Take subset for consistency calculation
+            src_subset = preds_src[:min_batch_size]
+            tgt_subset = preds_tgt[:min_batch_size]
+            
+            # Normalize by respective input magnitudes for fair comparison
+            src_input_ref = tf.abs(x_scaled_src[:min_batch_size]) + 1e-8
+            tgt_input_ref = tf.abs(x_scaled_tgt[:min_batch_size]) + 1e-8
+            
+            src_normalized = src_subset / src_input_ref
+            tgt_normalized = tgt_subset / tgt_input_ref
+            
+            direct_consistency = tf.reduce_mean(tf.square(src_normalized - tgt_normalized))
+            epoc_direct_consistency += direct_consistency.numpy() * x_src.shape[0]
+        
+        # === SMOOTHNESS LOSS COMPUTATION ===
+        if temporal_weight != 0 or frequency_weight != 0:
+            preds_src_tensor = tf.convert_to_tensor(preds_src_numpy) if not tf.is_tensor(preds_src) else preds_src
+            preds_tgt_tensor = tf.convert_to_tensor(preds_tgt_numpy) if not tf.is_tensor(preds_tgt) else preds_tgt
+            
+            smoothness_loss_src = compute_total_smoothness_loss(
+                preds_src_tensor, temporal_weight=temporal_weight, frequency_weight=frequency_weight
+            )
+            smoothness_loss_tgt = compute_total_smoothness_loss(
+                preds_tgt_tensor, temporal_weight=temporal_weight, frequency_weight=frequency_weight
+            )
+            batch_smoothness_loss = (smoothness_loss_src + smoothness_loss_tgt) / 2
+            epoc_smoothness_loss += batch_smoothness_loss.numpy() * x_src.shape[0]
+
+        # ============ OPTIONAL FDA VALIDATION TEST ============
+        # Test FDA mixing during validation for monitoring (only on first batch)
+        if idx == 0 and fda_weight > 0:
+            try:
+                # Apply FDA mixing like in training but for validation monitoring
+                x_src_complex_val = tf.complex(x_src_real[:,:,:,0], x_src_real[:,:,:,1])
+                x_tgt_complex_val = tf.complex(x_tgt_real[:,:,:,0], x_tgt_real[:,:,:,1])
+                
+                # Extract Delay-Doppler representations
+                src_amplitude_val, src_phase_val = F_extract_DD(x_src_complex_val)
+                tgt_amplitude_val, tgt_phase_val = F_extract_DD(x_tgt_complex_val)
+                
+                # Mix amplitudes
+                mixed_amplitude_val = fda_mix_pixels(src_amplitude_val, tgt_amplitude_val, fda_win_h, fda_win_w)
+                
+                # Keep source phase
+                mixed_complex_dd_val = apply_phase_to_amplitude(mixed_amplitude_val, src_phase_val)
+                
+                # Convert back to Time-Frequency domain
+                x_fda_mixed_complex_val = F_inverse_DD(mixed_complex_dd_val)
+                x_fda_mixed_real_val = tf.stack([tf.math.real(x_fda_mixed_complex_val), tf.math.imag(x_fda_mixed_complex_val)], axis=-1)
+                
+                # Scale FDA output
+                x_fda_mixed_numpy_val = x_fda_mixed_real_val.numpy()
+                x_fda_scaled_val, _, _ = minmaxScaler(x_fda_mixed_numpy_val, lower_range=lower_range, linear_interp=linear_interp)
+                
+                # Test FDA-mixed input performance
+                residual_fda_val, _ = model_cnn(x_fda_scaled_val, training=False, return_features=False)
+                preds_fda_val = x_fda_scaled_val + residual_fda_val
+                
+                print(f"    FDA validation test completed on batch {idx}")
+                
+            except Exception as e:
+                print(f"    Warning: FDA validation test failed: {e}")
+
+        # === Save H samples (same structure as training validation) ===
+        if idx == 0:
+            n_samples = min(3, x_src_real.shape[0], x_tgt_real.shape[0])
+            # Source samples
+            H_true_sample = y_src_real[:n_samples].copy()
+            H_input_sample = x_src_real[:n_samples].copy()
+            if hasattr(preds_src_descaled, 'numpy'):
+                H_est_sample = preds_src_descaled[:n_samples].numpy().copy()
+            else:
+                H_est_sample = preds_src_descaled[:n_samples].copy()
+            
+            mse_sample_source = np.mean((H_est_sample - H_true_sample) ** 2, axis=(1, 2, 3))
+            power_sample_source = np.mean(H_true_sample ** 2, axis=(1, 2, 3))
+            nmse_est_source = mse_sample_source / (power_sample_source + 1e-30)
+            mse_input_source = np.mean((H_input_sample - H_true_sample) ** 2, axis=(1, 2, 3))
+            nmse_input_source = mse_input_source / (power_sample_source + 1e-30)
+            
+            # Target samples
+            H_true_sample_target = y_tgt_real[:n_samples].copy()
+            H_input_sample_target = x_tgt_real[:n_samples].copy()
+            if hasattr(preds_tgt_descaled, 'numpy'):
+                H_est_sample_target = preds_tgt_descaled[:n_samples].numpy().copy()
+            else:
+                H_est_sample_target = preds_tgt_descaled[:n_samples].copy()
+            
+            mse_sample_target = np.mean((H_est_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            power_sample_target = np.mean(H_true_sample_target ** 2, axis=(1, 2, 3))
+            nmse_est_target = mse_sample_target / (power_sample_target + 1e-30)
+            mse_input_target = np.mean((H_input_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            nmse_input_target = mse_input_target / (power_sample_target + 1e-30)
+            
+            H_sample = [H_true_sample, H_input_sample, H_est_sample, nmse_input_source, nmse_est_source,
+                        H_true_sample_target, H_input_sample_target, H_est_sample_target, nmse_input_target, nmse_est_target]
+            
+        if return_H_gen:
+            # Convert to numpy if needed and append to lists
+            H_gen_src_batch = preds_src_descaled.numpy().copy() if hasattr(preds_src_descaled, 'numpy') else preds_src_descaled.copy()
+            H_gen_tgt_batch = preds_tgt_descaled.numpy().copy() if hasattr(preds_tgt_descaled, 'numpy') else preds_tgt_descaled.copy()
+            
+            all_H_gen_src.append(H_gen_src_batch)
+            all_H_gen_tgt.append(H_gen_tgt_batch)
+    
+    if return_H_gen:
+        H_gen_src_all = np.concatenate(all_H_gen_src, axis=0)
+        H_gen_tgt_all = np.concatenate(all_H_gen_tgt, axis=0)
+        H_gen = {
+            'H_gen_src': H_gen_src_all,
+            'H_gen_tgt': H_gen_tgt_all
+        }
+
+    # Calculate averages
+    avg_loss_est_source = epoc_loss_est_source / N_val_source
+    avg_loss_est_target = epoc_loss_est_target / N_val_target
+    avg_loss_est = (avg_loss_est_source + avg_loss_est_target) / 2
+    avg_nmse_source = epoc_nmse_val_source / N_val_source
+    avg_nmse_target = epoc_nmse_val_target / N_val_target
+    avg_nmse = (avg_nmse_source + avg_nmse_target) / 2
+    avg_jmmd_loss = epoc_jmmd_loss / N_val_source if epoc_jmmd_loss > 0 else 0.0
+    avg_smoothness_loss = epoc_smoothness_loss / N_val_source if epoc_smoothness_loss > 0 else 0.0
+    avg_residual_norm = epoc_residual_norm / N_val_source
+    
+    # Domain-aware consistency averages
+    avg_improvement_consistency = epoc_improvement_consistency / N_val_source if epoc_improvement_consistency > 0 else 0.0
+    avg_residual_consistency = epoc_residual_consistency / N_val_source if epoc_residual_consistency > 0 else 0.0
+    avg_direct_consistency = epoc_direct_consistency / N_val_source if epoc_direct_consistency > 0 else 0.0
+    
+    # Print enhanced validation statistics
+    print(f"    Validation residual norm (avg): {avg_residual_norm:.6f}")
+    print(f"    Validation JMMD loss: {avg_jmmd_loss:.6f}")
+    print(f"    Validation improvement consistency: {avg_improvement_consistency:.6f}")
+    print(f"    Validation residual pattern consistency: {avg_residual_consistency:.6f}")
+    print(f"    Validation direct consistency: {avg_direct_consistency:.6f}")
+    print(f"    FDA window: {fda_win_h}x{fda_win_w}, weight: {fda_weight}")
+    
+    # Domain accuracy placeholders (compatible with existing code)
+    avg_domain_acc_source = 0.5
+    avg_domain_acc_target = 0.5
+    avg_domain_acc = 0.5
+
+    # Total loss (no discriminator component)
+    avg_total_loss = (est_weight * avg_loss_est + 
+                    domain_weight * avg_jmmd_loss + 
+                    improvement_consistency_weight * avg_improvement_consistency +
+                    residual_consistency_weight * avg_residual_consistency +
+                    consistency_weight * avg_direct_consistency +
+                    avg_smoothness_loss)
+
+    # Return compatible structure with enhanced domain-aware metrics
+    epoc_eval_return = {
+        'avg_total_loss': avg_total_loss,
+        'avg_loss_est_source': avg_loss_est_source,
+        'avg_loss_est_target': avg_loss_est_target, 
+        'avg_loss_est': avg_loss_est,
+        'avg_gan_disc_loss': 0.0,  # No discriminator
+        'avg_domain_loss': avg_jmmd_loss + avg_improvement_consistency + avg_residual_consistency,  # Combined domain-aware loss
+        'avg_nmse_source': avg_nmse_source,
+        'avg_nmse_target': avg_nmse_target,
+        'avg_nmse': avg_nmse,
+        'avg_domain_acc_source': avg_domain_acc_source,
+        'avg_domain_acc_target': avg_domain_acc_target,
+        'avg_domain_acc': avg_domain_acc,
+        'avg_smoothness_loss': avg_smoothness_loss,
+        # Additional domain-aware consistency metrics for detailed monitoring
+        'avg_improvement_consistency': avg_improvement_consistency,
+        'avg_residual_consistency': avg_residual_consistency,
+        'avg_direct_consistency': avg_direct_consistency
+    }
+
+    if return_H_gen:
+        return H_sample, epoc_eval_return, H_gen
+    return H_sample, epoc_eval_return
+
 ##    
 ### Input Domain translation 
 class CycleGANGenerator(tf.keras.Model):

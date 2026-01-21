@@ -373,20 +373,17 @@ for sub_folder in sub_folder_:
         if (epoch==epoch_min) or (epoch+1>epoch_min and (epoch-epoch_min)%epoch_step==0) and epoch!=n_epochs-1:
             # 
             H_sample, epoc_val_return = val_step_cnn_residual_fda(model, loader_H_eval, loss_fn, lower_range, 
-                                            weights=weights, linear_interp=linear_interp,
-                                            fda_win_h=fda_win_h, fda_win_w=fda_win_w, fda_weight=fda_weight)
+                                            weights=weights, linear_interp=linear_interp)
             
             visualize_H(H_sample, H_to_save, epoch, plotfig.figChan, flag, model_path, sub_folder, domain_weight=weights['domain_weight'])
             flag = 0  # after the first epoch, no need to save H_true anymore
         elif epoch==n_epochs-1:
             _, epoc_val_return, H_val_gen = val_step_cnn_residual_fda(model, loader_H_eval, loss_fn, lower_range, 
-                                            weights=weights, linear_interp=linear_interp, return_H_gen=True,
-                                            fda_win_h=fda_win_h, fda_win_w=fda_win_w, fda_weight=fda_weight)  
+                                            weights=weights, linear_interp=linear_interp, return_H_gen=True)  
         else:
             # 
             _, epoc_val_return = val_step_cnn_residual_fda(model, loader_H_eval, loss_fn, lower_range, 
-                                        weights=weights, linear_interp=linear_interp,
-                                        fda_win_h=fda_win_h, fda_win_w=fda_win_w, fda_weight=fda_weight)
+                                        weights=weights, linear_interp=linear_interp)
         
         post_val(epoc_val_return, epoch, n_epochs, val_metrics, domain_weight=weights['domain_weight'])
         
