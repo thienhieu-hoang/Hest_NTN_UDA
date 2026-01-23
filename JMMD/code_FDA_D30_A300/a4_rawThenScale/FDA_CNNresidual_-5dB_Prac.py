@@ -112,17 +112,17 @@ indices_target = np.resize(indices_target, N_samp)
 
 # =======================================================
 ## Divide the indices into training and validation sets
-# indices_train_source = indices_source[:train_size]
-# indices_val_source   = indices_source[train_size:train_size + val_size]
+indices_train_source = indices_source[:train_size]
+indices_val_source   = indices_source[train_size:train_size + val_size]
 
-# indices_train_target = indices_target[:train_size]
-# indices_val_target   = indices_target[train_size:train_size + val_size]
+indices_train_target = indices_target[:train_size]
+indices_val_target   = indices_target[train_size:train_size + val_size]
 
 # to test code
-indices_train_source = indices_source[:96]
-indices_val_source = indices_source[2032:]
-indices_train_target = indices_target[:96]
-indices_val_target = indices_target[2032:]
+# indices_train_source = indices_source[:96]
+# indices_val_source = indices_source[2032:]
+# indices_train_target = indices_target[:96]
+# indices_val_target = indices_target[2032:]
 
 print('train_size = ', indices_train_source.shape[0])
 print('val_size = ', indices_val_source.shape[0])
@@ -159,12 +159,12 @@ from JMMD.helper.utils_GAN import post_val, train_step_cnn_residual_fda_rawThenS
 import time
 start = time.perf_counter()
 
-# n_epochs= 300 # 300
-# epoch_min = 100
-# epoch_step = 20
-n_epochs= 5
-epoch_min = 0
-epoch_step = 1
+n_epochs= 300 # 300
+epoch_min = 100
+epoch_step = 20
+# n_epochs= 5
+# epoch_min = 0
+# epoch_step = 1
 
 sub_folder_ = ['GAN_practical']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
 
