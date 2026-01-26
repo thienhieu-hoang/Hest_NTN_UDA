@@ -4531,7 +4531,7 @@ def train_step_cnn_residual_source_only(model_cnn, loader_H, loss_fn, optimizer,
     Args:
         model_cnn: CNN model (CNNGenerator instance, not GAN wrapper)
         loader_H: tuple of (loader_H_input_train_src, loader_H_true_train_src, 
-                          loader_H_input_train_tgt, loader_H_true_train_tgt) - tgt used only for monitoring
+                        loader_H_input_train_tgt, loader_H_true_train_tgt) - tgt used only for monitoring
         loss_fn: tuple of loss functions (estimation_loss, bce_loss) - only first one used
         optimizer: single optimizer for CNN
         lower_range: lower range for min-max scaling
