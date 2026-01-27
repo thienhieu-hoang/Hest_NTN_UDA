@@ -8413,19 +8413,14 @@ def train_step_cnn_residual_fda_fullTranslation2(model_cnn, loader_H, loss_fn, o
     Key Innovation: Uses TARGET data as primary training source (no target labels needed!)
     
     Workflow:
-    1. FDA Input Translation: Target input → Source style input 
-    2. FDA Pseudo-Label Generation: Target input → Source style pseudo-labels (same as step 1!)
+    1. FDA Input Translation: Target input → Source input
+    2. FDA Pseudo-Label Generation: Target input → Source label
     3. Train CNN with residual learning using: (Translated target input, Translated target pseudo-labels)
     
-    Training pairs (NO TARGET LABELS NEEDED):
-    - Input: Target input translated to source style
-    - Label: Target input translated to source style (same translation = pseudo-label!)
-    
-    This works because:
-    - We assume target inputs are already "reasonable" channel estimates
-    - We translate them to source style to match the model's expected domain
-    - The model learns to refine translated target inputs to perfect translated quality
-    
+    Training pairs:
+    - Input: Target input translated to source input style
+    - Label: Target input translated to source label style 
+
     Args:
         model_cnn: CNN model (CNNGenerator instance)
         loader_H: tuple of loaders (target true is unused - we don't have target labels)
@@ -8452,7 +8447,8 @@ def train_step_cnn_residual_fda_fullTranslation2(model_cnn, loader_H, loss_fn, o
     epoc_loss_est = 0.0
     epoc_loss_est_source = 0.0  # Monitor source performance (reverse testing)
     epoc_residual_norm = 0.0
-    epoc_fda_effect = 0.0  # Track FDA translation effect
+    epoc_fda_effect_input = 0.0   # Track FDA effect on input translation
+    epoc_fda_effect_label = 0.0   # Track FDA effect on label translation
     N_train = 0
     
     # Initialize feature variables
@@ -8480,101 +8476,139 @@ def train_step_cnn_residual_fda_fullTranslation2(model_cnn, loader_H, loss_fn, o
         # NOTE: We DON'T use y_tgt (target labels) - we don't have them!
         N_train += x_tgt.shape[0]  # ← Count target samples as primary
 
-        # Preprocess SOURCE data (for FDA style reference only)
+        # Preprocess data to real format (NO SCALING YET - RAW FDA FIRST!)
+        # SOURCE data (for FDA style reference)
         x_src_real = complx2real(x_src)
         y_src_real = complx2real(y_src)
         x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
         y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
-        x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
-        y_scaled_src, _, _ = minmaxScaler(y_src_real, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
 
-        # Preprocess TARGET data (primary content source)
+        # TARGET data (primary content source)
         x_tgt_real = complx2real(x_tgt)
         x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
-        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
 
-        # ============ KEY INSIGHT: SINGLE FDA TRANSLATION FOR BOTH INPUT AND PSEUDO-LABELS ============
-        # Convert to complex for FDA (Target→Source direction)
-        x_tgt_complex = tf.complex(x_scaled_tgt[:,:,:,0], x_scaled_tgt[:,:,:,1])  # ← TARGET as content
-        x_src_complex = tf.complex(x_scaled_src[:,:,:,0], x_scaled_src[:,:,:,1])  # ← SOURCE as style reference
+        # ============ STEP 1: RAW FDA INPUT TRANSLATION (Target→Source INPUT) ============
+        # Convert raw data to complex for FDA
+        x_tgt_complex = tf.complex(x_tgt_real[:,:,:,0], x_tgt_real[:,:,:,1])  # ← TARGET content
+        x_src_complex = tf.complex(x_src_real[:,:,:,0], x_src_real[:,:,:,1])  # ← SOURCE INPUT style
         
-        # Extract Delay-Doppler representations
-        tgt_amplitude, tgt_phase = F_extract_DD(x_tgt_complex)  # ← TARGET amplitude & phase (content)
-        src_amplitude, src_phase = F_extract_DD(x_src_complex)  # ← SOURCE amplitude & phase (style)
+        # Extract Delay-Doppler representations for INPUT translation
+        tgt_amplitude, tgt_phase = F_extract_DD(x_tgt_complex)      # ← Target content
+        src_input_amplitude, src_input_phase = F_extract_DD(x_src_complex)  # ← Source INPUT style
         
-        # Mix amplitudes: SOURCE style in center, TARGET style in outer regions
-        # ← TARGET content gets SOURCE style
-        mixed_amplitude = fda_mix_pixels(tgt_amplitude, src_amplitude, fda_win_h, fda_win_w)
+        # Mix amplitudes: Target content + Source INPUT style
+        mixed_amplitude_input = fda_mix_pixels(tgt_amplitude, src_input_amplitude, fda_win_h, fda_win_w)
         
-        # Keep TARGET phase (content preservation from target)
-        # ← Keep target's channel structure/content
-        mixed_complex_dd = apply_phase_to_amplitude(mixed_amplitude, tgt_phase)
+        # Keep target phase (content preservation)
+        mixed_complex_dd_input = apply_phase_to_amplitude(mixed_amplitude_input, tgt_phase)
         
         # Convert back to Time-Frequency domain
-        x_fda_mixed_complex = F_inverse_DD(mixed_complex_dd)
-        x_fda_mixed = tf.stack([tf.math.real(x_fda_mixed_complex), tf.math.imag(x_fda_mixed_complex)], axis=-1)
+        x_fda_input_complex = F_inverse_DD(mixed_complex_dd_input)
+        x_fda_input_real = tf.stack([tf.math.real(x_fda_input_complex), tf.math.imag(x_fda_input_complex)], axis=-1)
         
-        # Track FDA translation effect
-        fda_difference = tf.reduce_mean(tf.abs(x_fda_mixed - x_scaled_tgt))
-        epoc_fda_effect += fda_difference.numpy() * x_tgt.shape[0]
+        # Track FDA effect on input translation
+        fda_difference_input = tf.reduce_mean(tf.abs(x_fda_input_real - x_tgt_real))
+        epoc_fda_effect_input += fda_difference_input.numpy() * x_tgt.shape[0]
         
-        # ============ PSEUDO-LABEL GENERATION ============
-        # KEY INSIGHT: Use the SAME translation as pseudo-labels!
-        # This assumes target inputs are reasonable estimates that need style translation
-        pseudo_labels_target = x_fda_mixed  # ← Same as translated input!
+        # ============ STEP 2: RAW FDA LABEL TRANSLATION (Target→Source LABEL) ============
+        # Convert SOURCE LABELS to complex for FDA style reference
+        y_src_complex = tf.complex(y_src_real[:,:,:,0], y_src_real[:,:,:,1])  # ← SOURCE LABEL style
+        # Target content already available as x_tgt_complex
         
-        # Alternative approach: Apply slight enhancement to pseudo-labels (optional)
-        # pseudo_labels_target = x_fda_mixed * 1.05  # Slightly enhanced version
+        # Extract Delay-Doppler representations for LABEL translation
+        # Target content + Source LABEL style
+        src_label_amplitude, src_label_phase = F_extract_DD(y_src_complex)  # ← Source LABEL style
+        # tgt_amplitude, tgt_phase already computed above
         
-        # ============ CNN TRAINING with RESIDUAL LEARNING ============
+        # Mix amplitudes: Target content + Source LABEL style  
+        mixed_amplitude_label = fda_mix_pixels(tgt_amplitude, src_label_amplitude, fda_win_h, fda_win_w)
+        
+        # Keep target phase (content preservation for labels)
+        mixed_complex_dd_label = apply_phase_to_amplitude(mixed_amplitude_label, tgt_phase)
+        
+        # Convert back to Time-Frequency domain
+        y_fda_label_complex = F_inverse_DD(mixed_complex_dd_label)
+        y_fda_label_real = tf.stack([tf.math.real(y_fda_label_complex), tf.math.imag(y_fda_label_complex)], axis=-1)
+        
+        # Track FDA effect on label translation
+        fda_difference_label = tf.reduce_mean(tf.abs(y_fda_label_real - x_tgt_real))
+        epoc_fda_effect_label += fda_difference_label.numpy() * x_tgt.shape[0]
+        
+        # ============ STEP 3: SCALE FDA OUTPUTS WITH SHARED PARAMETERS ============
+        # Scale FDA-mixed input to [-1,1] and get scaling parameters
+        x_fda_input_numpy = x_fda_input_real.numpy()
+        x_fda_input_scaled, fda_min, fda_max = minmaxScaler(x_fda_input_numpy, lower_range=lower_range, linear_interp=linear_interp)
+        
+        # Scale FDA-mixed labels using THE SAME scaling parameters for consistency
+        batch_size = y_fda_label_real.shape[0]
+        
+        # Handle scalar vs array FDA parameters for labels
+        if np.isscalar(fda_min):
+            fda_min_array = np.tile([[fda_min, fda_min]], (batch_size, 1))
+            fda_max_array = np.tile([[fda_max, fda_max]], (batch_size, 1))
+        else:
+            fda_min_array = fda_min if fda_min.shape == (batch_size, 2) else np.tile(fda_min, (batch_size, 1))
+            fda_max_array = fda_max if fda_max.shape == (batch_size, 2) else np.tile(fda_max, (batch_size, 1))
+        
+        # Scale FDA-mixed labels with FDA input's scaling parameters
+        y_fda_label_numpy = y_fda_label_real.numpy()
+        y_fda_label_scaled, _, _ = minmaxScaler(y_fda_label_numpy, min_pre=fda_min_array, max_pre=fda_max_array, 
+                                            lower_range=lower_range, linear_interp=linear_interp)
+        
+        # ============ STEP 4: SCALE TARGET DATA WITH FDA PARAMETERS FOR HYBRID TRAINING ============
+        # Scale original target data with FDA parameters for consistency (for hybrid training)
+        x_tgt_scaled_with_fda_params, _, _ = minmaxScaler(x_tgt_real, min_pre=fda_min_array, max_pre=fda_max_array, 
+                                                        lower_range=lower_range, linear_interp=linear_interp)
+
+        # ============ STEP 5: CNN TRAINING with RESIDUAL LEARNING ============
         with tf.GradientTape() as tape:
-            batch_size = x_scaled_tgt.shape[0]
+            batch_size_int = x_fda_input_scaled.shape[0]
             
             if fda_weight < 1.0:
-                # Hybrid training: Part FDA-translated target, part pure target
-                fda_samples = int(batch_size * fda_weight)
-                remaining_samples = batch_size - fda_samples
+                # Hybrid training: Part FDA-translated, part original target (both using FDA scaling parameters)
+                fda_samples = int(batch_size_int * fda_weight)
+                remaining_samples = batch_size_int - fda_samples
                 
                 if fda_samples > 0 and remaining_samples > 0:
                     # Split batch for hybrid training
-                    x_train_fda = x_fda_mixed[:fda_samples]                    # FDA-translated target inputs
-                    y_train_fda = pseudo_labels_target[:fda_samples]           # FDA-translated pseudo-labels
+                    x_train_fda = x_fda_input_scaled[:fda_samples]                        # FDA-translated target→source input
+                    y_train_fda = y_fda_label_scaled[:fda_samples]                        # FDA-translated target→source labels
                     
-                    x_train_tgt = x_scaled_tgt[fda_samples:]                   # Pure target inputs
-                    y_train_tgt = x_scaled_tgt[fda_samples:]                   # Pure target as its own label (identity)
+                    x_train_tgt = x_tgt_scaled_with_fda_params[fda_samples:]              # Target scaled with FDA params
+                    y_train_tgt = x_tgt_scaled_with_fda_params[fda_samples:]              # Target as its own pseudo-label
                     
-                    # Combine for training
+                    # Combine for training (both in FDA scaling space)
                     x_train_combined = tf.concat([x_train_fda, x_train_tgt], axis=0)
-                    y_train_combined = tf.concat([y_train_fda, y_train_tgt], axis=0)
+                    y_train_combined = tf.concat([y_train_fda, y_train_tgt], axis=0)      # ← FDA labels + target pseudo-labels
                     
                     # Forward pass on combined input
                     residual_combined, features_src = model_cnn(x_train_combined, training=True, return_features=True)
                     x_corrected_combined = x_train_combined + residual_combined
                     
                 elif fda_samples == 0:
-                    # Pure target training (target as its own label)
-                    residual_tgt, features_src = model_cnn(x_scaled_tgt, training=True, return_features=True)
-                    x_corrected_combined = x_scaled_tgt + residual_tgt
-                    y_train_combined = x_scaled_tgt  # Target as its own pseudo-label
+                    # Pure target training (scaled with FDA parameters)
+                    residual_tgt, features_src = model_cnn(x_tgt_scaled_with_fda_params, training=True, return_features=True)
+                    x_corrected_combined = x_tgt_scaled_with_fda_params + residual_tgt
+                    y_train_combined = x_tgt_scaled_with_fda_params  # Target as its own pseudo-label
                     residual_combined = residual_tgt
                 else:
-                    # Pure FDA training (translated target with translated pseudo-labels)
-                    residual_fda, features_src = model_cnn(x_fda_mixed, training=True, return_features=True)
-                    x_corrected_combined = x_fda_mixed + residual_fda
-                    y_train_combined = pseudo_labels_target  # FDA-translated pseudo-labels
+                    # Pure FDA training (fully translated pairs: target→source input & target→source labels)
+                    residual_fda, features_src = model_cnn(x_fda_input_scaled, training=True, return_features=True)
+                    x_corrected_combined = x_fda_input_scaled + residual_fda
+                    y_train_combined = y_fda_label_scaled  # ← FDA-translated target→source labels
                     residual_combined = residual_fda
                 
-                # Estimation loss: Model output vs pseudo-labels (no real target labels!)
+                # Estimation loss: Both inputs and labels in FDA scaling space
                 est_loss = loss_fn_est(y_train_combined, x_corrected_combined)
                     
             else:
-                # Pure FDA training: Use FDA-translated target input with FDA pseudo-labels
-                residual_fda, features_src = model_cnn(x_fda_mixed, training=True, return_features=True)
-                x_corrected_fda = x_fda_mixed + residual_fda
+                # Pure FDA training: Use FULLY translated pairs (target→source input & target→source labels)
+                residual_fda, features_src = model_cnn(x_fda_input_scaled, training=True, return_features=True)
+                x_corrected_fda = x_fda_input_scaled + residual_fda
                 residual_combined = residual_fda
                 
-                # Estimation loss: FDA-corrected vs FDA pseudo-labels
-                est_loss = loss_fn_est(pseudo_labels_target, x_corrected_fda)
+                # Estimation loss: FDA-corrected input vs FDA-translated labels
+                est_loss = loss_fn_est(y_fda_label_scaled, x_corrected_fda)
             
             # Residual regularization: Encourage small, meaningful corrections
             residual_reg = 0.001 * tf.reduce_mean(tf.square(residual_combined))
@@ -8602,6 +8636,10 @@ def train_step_cnn_residual_fda_fullTranslation2(model_cnn, loader_H, loss_fn, o
         # ============ MONITOR SOURCE PERFORMANCE (reverse testing) ============
         # Test how well the model (trained on translated target) performs on source domain
         if batch_idx < loader_H_true_train_src.total_batches:
+            # Scale source with its own parameters for monitoring (traditional approach)
+            x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
+            y_scaled_src, _, _ = minmaxScaler(y_src_real, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+            
             residual_src, features_tgt = model_cnn(x_scaled_src, training=False, return_features=True)
             x_corrected_src = x_scaled_src + residual_src
             est_loss_src = loss_fn_est(y_scaled_src, x_corrected_src)  # ← We DO have source labels for testing
@@ -8654,14 +8692,16 @@ def train_step_cnn_residual_fda_fullTranslation2(model_cnn, loader_H, loss_fn, o
     avg_loss_est = epoc_loss_est / N_train
     avg_loss_est_source = epoc_loss_est_source / N_train if epoc_loss_est_source > 0 else 0.0  # ← Source monitoring
     avg_residual_norm = epoc_residual_norm / N_train
-    avg_fda_effect = epoc_fda_effect / N_train
+    avg_fda_effect_input = epoc_fda_effect_input / N_train
+    avg_fda_effect_label = epoc_fda_effect_label / N_train
     
-    # Print enhanced FDA statistics for target→source with pseudo-labels
-    print(f"    Target→Source FDA with Pseudo-Labels residual norm (avg): {avg_residual_norm:.6f}")
-    print(f"    Target→Source FDA translation effect: {avg_fda_effect:.6f}")
+    # Print enhanced FDA statistics for target→source with separate input/label translations
+    print(f"    Target→Source FULL FDA Translation residual norm (avg): {avg_residual_norm:.6f}")
+    print(f"    FDA input translation effect (Target→Source INPUT): {avg_fda_effect_input:.6f}")
+    print(f"    FDA label translation effect (Target→Source LABEL): {avg_fda_effect_label:.6f}")
     print(f"    Source domain testing performance: {avg_loss_est_source:.6f}")
     print(f"    FDA window: {fda_win_h}x{fda_win_w}, weight: {fda_weight}")
-    print(f"    Training on translated target inputs with pseudo-labels (no real target labels used)")
+    print(f"    Training: Target→Source input style + Target→Source label style")
     
     # Return compatible structure (note the role reversal)
     return train_step_Output(
@@ -8673,7 +8713,7 @@ def train_step_cnn_residual_fda_fullTranslation2(model_cnn, loader_H, loss_fn, o
         film_features_source=features_src[-1] if features_src is not None else None,
         avg_epoc_loss_d=0.0  # No discriminator
     )
-
+    
 ##    
 ### Input Domain translation 
 class CycleGANGenerator(tf.keras.Model):
