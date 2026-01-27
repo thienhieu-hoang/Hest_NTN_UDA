@@ -254,7 +254,8 @@ for sub_folder in sub_folder_:
     perform_to_save = {}    # list to save to .mat file for nmse, losses,...
 
     # 
-    model = CNNGenerator()
+    model = CNNGenerator(n_blocks=4, base_filters=32)
+    print("4 SameShapeBlock residual blocks with 32 base filters")
     # 
     ####
     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4, beta_1=0.5, beta_2=0.9)
