@@ -25,7 +25,7 @@ from Domain_Adversarial.helper.utils_GAN import visualize_H
 from JMMD.helper.utils_GAN import save_checkpoint_jmmd as save_checkpoint
 from JMMD.helper.utils_GAN import WeightScheduler
 
-SNR = 0
+SNR = -5
 # source_data_file_path_label = os.path.abspath(os.path.join(code_dir, '..', 'generatedChan', 'OpenNTN','H_perfect.mat'))
 source_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_D_30_sim', f'SNR_10dB', 'matlabNTN.mat'))
 target_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_A_300_sim', f'SNR_{SNR}dB', 'matlabNTN.mat'))
@@ -163,7 +163,7 @@ epoch_step = 20
 # epoch_min = 0
 # epoch_step = 1
 
-sub_folder_ = ['GAN_linear']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
+sub_folder_ = ['GAN_practical']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
 
 for sub_folder in sub_folder_:
     print(f"Processing: {sub_folder}")
@@ -260,7 +260,6 @@ for sub_folder in sub_folder_:
     ####
     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4, beta_1=0.5, beta_2=0.9)
     ####
-    
     
     flag = 1 # flag to plot and save H_true
     epoc_pad = []    # epochs that calculating pad (return_features == True)
