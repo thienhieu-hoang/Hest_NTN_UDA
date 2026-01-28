@@ -8715,6 +8715,345 @@ def train_step_cnn_residual_fda_fullTranslation2(model_cnn, loader_H, loss_fn, o
     )
     
 ##    
+def train_step_cnn_residual_FDAfullTranslation1_coral(model_cnn, loader_H, loss_fn, optimizer, lower_range=-1, 
+                                            save_features=False, nsymb=14, weights=None, linear_interp=False,
+                                            fda_win_h=13, fda_win_w=3, fda_weight=1.0, coral_loss_fn=None):
+    """
+    CNN-only residual training step combining FDA Full Translation 1 + CORAL domain adaptation
+    
+    Workflow:
+    1. RAW FDA FULL Translation: Source input → Target style input AND 
+                                Source labels → Target style labels
+    2. Scale FDA outputs with shared parameters for consistency
+    3. CORAL Loss: Align features between FDA-translated and raw target domains
+    4. Residual learning: Train CNN to predict corrections
+    
+    Training pairs:
+    - Input: Source content + Target style (FDA-mixed input, then scaled)
+    - Label: Source labels + Target INPUT style (FDA-mixed labels using TARGET INPUT as style)
+    - Feature alignment: CORAL loss between FDA features and raw target features
+    
+    Args:
+        model_cnn: CNN model (CNNGenerator instance)
+        loader_H: tuple of loaders
+        loss_fn: tuple of loss functions (only first one used)
+        optimizer: single optimizer for CNN
+        lower_range: lower range for min-max scaling
+        save_features: bool, whether to save features
+        nsymb: number of symbols  
+        weights: weight dictionary
+        linear_interp: linear interpolation flag
+        fda_win_h: FDA window height (default 13)
+        fda_win_w: FDA window width (default 3)
+        fda_weight: Weight for FDA vs source training (1.0 = 100% FDA)
+        coral_loss_fn: CORAL loss function instance (if None, will create default)
+    """
+    loader_H_input_train_src, loader_H_true_train_src, \
+        loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
+    loss_fn_est = loss_fn[0]  # Only need estimation loss
+    
+    est_weight = weights.get('est_weight', 1.0) if weights else 1.0
+    domain_weight = weights.get('domain_weight', 1.0) if weights else 1.0
+    temporal_weight = weights.get('temporal_weight', 0.0) if weights else 0.0
+    frequency_weight = weights.get('frequency_weight', 0.0) if weights else 0.0
+    
+    # Initialize CORAL loss if not provided
+    if coral_loss_fn is None:
+        coral_loss_fn = GlobalPoolingCORALLoss()
+    
+    epoc_loss_total = 0.0
+    epoc_loss_est = 0.0
+    epoc_loss_est_target = 0.0
+    epoc_loss_coral = 0.0
+    epoc_residual_norm = 0.0
+    epoc_fda_effect_input = 0.0   # Track FDA effect on inputs
+    epoc_fda_effect_label = 0.0   # Track FDA effect on labels
+    N_train = 0
+    
+    # Initialize feature variables
+    features_fda = None
+    features_tgt_raw = None
+    
+    if save_features and domain_weight != 0:
+        features_h5_path_source = 'features_source.h5'
+        if os.path.exists(features_h5_path_source):
+            os.remove(features_h5_path_source)
+        features_h5_source = h5py.File(features_h5_path_source, 'w')
+        features_dataset_source = None
+
+        features_h5_path_target = 'features_target.h5'
+        if os.path.exists(features_h5_path_target):
+            os.remove(features_h5_path_target)   
+        features_h5_target = h5py.File(features_h5_target, 'w')
+        features_dataset_target = None
+    
+    for batch_idx in range(loader_H_true_train_src.total_batches):
+        # Get data
+        x_src = loader_H_input_train_src.next_batch()
+        y_src = loader_H_true_train_src.next_batch()
+        x_tgt = loader_H_input_train_tgt.next_batch()
+        y_tgt = loader_H_true_train_tgt.next_batch()  # Not used in label translation (we don't have target labels)
+        N_train += x_src.shape[0]
+
+        # Preprocess data to real format (NO SCALING YET - RAW FDA FIRST!)
+        x_src_real = complx2real(x_src)
+        y_src_real = complx2real(y_src)
+        x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
+        y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
+
+        x_tgt_real = complx2real(x_tgt)
+        x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
+        # Note: We don't process y_tgt since we don't have target labels for style reference
+
+        # ============ STEP 1: RAW FDA INPUT TRANSLATION (Source→Target INPUT) ============
+        # Convert raw data to complex for FDA
+        x_src_complex = tf.complex(x_src_real[:,:,:,0], x_src_real[:,:,:,1])
+        x_tgt_complex = tf.complex(x_tgt_real[:,:,:,0], x_tgt_real[:,:,:,1])
+        
+        # Extract Delay-Doppler representations for RAW INPUTS
+        src_amplitude_input, src_phase_input = F_extract_DD(x_src_complex)
+        tgt_amplitude_input, tgt_phase_input = F_extract_DD(x_tgt_complex)
+        
+        # Mix amplitudes: Target style in center, Source style in outer regions
+        mixed_amplitude_input = fda_mix_pixels(src_amplitude_input, tgt_amplitude_input, fda_win_h, fda_win_w)
+        
+        # Keep source phase (content preservation)
+        mixed_complex_dd_input = apply_phase_to_amplitude(mixed_amplitude_input, src_phase_input)
+        
+        # Convert back to Time-Frequency domain
+        x_fda_mixed_complex = F_inverse_DD(mixed_complex_dd_input)
+        x_fda_mixed_real = tf.stack([tf.math.real(x_fda_mixed_complex), tf.math.imag(x_fda_mixed_complex)], axis=-1)
+        
+        # Track FDA effect on inputs
+        fda_difference_input = tf.reduce_mean(tf.abs(x_fda_mixed_real - x_src_real))
+        epoc_fda_effect_input += fda_difference_input.numpy() * x_src.shape[0]
+        
+        # ============ STEP 2: RAW FDA LABEL TRANSLATION (Source Labels→Target INPUT Style) ============
+        # Convert raw labels to complex for FDA
+        y_src_complex = tf.complex(y_src_real[:,:,:,0], y_src_real[:,:,:,1])
+        # KEY: Use TARGET INPUT (not target labels) as style reference for label translation
+        # x_tgt_complex already computed above
+        
+        # Extract Delay-Doppler representations: SOURCE LABELS + TARGET INPUT STYLE
+        src_amplitude_label, src_phase_label = F_extract_DD(y_src_complex)              # Source labels content
+        tgt_amplitude_style, tgt_phase_style = F_extract_DD(x_tgt_complex)              # Target INPUT style (not labels!)
+        
+        # Mix label amplitudes: Use TARGET INPUT STYLE for labels (since we don't have target labels)
+        mixed_amplitude_label = fda_mix_pixels(src_amplitude_label, tgt_amplitude_style, fda_win_h, fda_win_w)
+        
+        # Keep source label phase (content preservation for labels)
+        mixed_complex_dd_label = apply_phase_to_amplitude(mixed_amplitude_label, src_phase_label)
+        
+        # Convert back to Time-Frequency domain
+        y_fda_mixed_complex = F_inverse_DD(mixed_complex_dd_label)
+        y_fda_mixed_real = tf.stack([tf.math.real(y_fda_mixed_complex), tf.math.imag(y_fda_mixed_complex)], axis=-1)
+        
+        # Track FDA effect on labels
+        fda_difference_label = tf.reduce_mean(tf.abs(y_fda_mixed_real - y_src_real))
+        epoc_fda_effect_label += fda_difference_label.numpy() * x_src.shape[0]
+        
+        # ============ STEP 3: SCALE FDA OUTPUTS WITH SHARED PARAMETERS ============
+        # Scale FDA-mixed input to [-1,1] and get scaling parameters
+        x_fda_mixed_numpy = x_fda_mixed_real.numpy()
+        x_fda_scaled, fda_min, fda_max = minmaxScaler(x_fda_mixed_numpy, lower_range=lower_range, linear_interp=linear_interp)
+        
+        # Scale FDA-mixed labels using THE SAME scaling parameters for consistency
+        batch_size = y_fda_mixed_real.shape[0]
+        
+        # Handle scalar vs array FDA parameters for labels
+        if np.isscalar(fda_min):
+            fda_min_array = np.tile([[fda_min, fda_min]], (batch_size, 1))
+            fda_max_array = np.tile([[fda_max, fda_max]], (batch_size, 1))
+        else:
+            fda_min_array = fda_min if fda_min.shape == (batch_size, 2) else np.tile(fda_min, (batch_size, 1))
+            fda_max_array = fda_max if fda_max.shape == (batch_size, 2) else np.tile(fda_max, (batch_size, 1))
+        
+        # Scale FDA-mixed labels with FDA input's scaling parameters
+        y_fda_mixed_numpy = y_fda_mixed_real.numpy()
+        y_fda_scaled, _, _ = minmaxScaler(y_fda_mixed_numpy, min_pre=fda_min_array, max_pre=fda_max_array, 
+                                        lower_range=lower_range, linear_interp=linear_interp)
+        
+        # ============ STEP 4: SCALE TARGET FOR CORAL COMPARISON ============
+        # Scale target input with its own parameters for CORAL feature comparison
+        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+        
+        # ============ STEP 5: SCALE SOURCE DATA WITH FDA PARAMETERS FOR HYBRID TRAINING ============
+        # Scale source input and labels with FDA parameters for consistency (for hybrid training)
+        x_src_scaled_with_fda_params, _, _ = minmaxScaler(x_src_real, min_pre=fda_min_array, max_pre=fda_max_array, 
+                                                        lower_range=lower_range, linear_interp=linear_interp)
+        y_src_scaled_with_fda_params, _, _ = minmaxScaler(y_src_real, min_pre=fda_min_array, max_pre=fda_max_array, 
+                                                        lower_range=lower_range, linear_interp=linear_interp)
+
+        # ============ STEP 6: DUAL FLOW CNN TRAINING + CORAL ALIGNMENT ============
+        with tf.GradientTape() as tape:
+            # === FLOW 1: FDA-TRANSLATED INPUT (Main training flow) ===
+            batch_size_int = x_fda_scaled.shape[0]
+            
+            if fda_weight < 1.0:
+                # Hybrid training: Part FDA-translated, part source (both using FDA scaling parameters)
+                fda_samples = int(batch_size_int * fda_weight)
+                remaining_samples = batch_size_int - fda_samples
+                
+                if fda_samples > 0 and remaining_samples > 0:
+                    # Split batch for hybrid training
+                    x_train_fda = x_fda_scaled[:fda_samples]                           # FDA-translated inputs
+                    y_train_fda = y_fda_scaled[:fda_samples]                           # FDA-translated labels (using TARGET INPUT style)
+                    
+                    x_train_src = x_src_scaled_with_fda_params[fda_samples:]          # Source scaled with FDA params
+                    y_train_src = y_src_scaled_with_fda_params[fda_samples:]          # Source labels scaled with FDA params
+                    
+                    # Combine for training (both in FDA scaling space)
+                    x_train_combined = tf.concat([x_train_fda, x_train_src], axis=0)
+                    y_train_combined = tf.concat([y_train_fda, y_train_src], axis=0)   # FDA labels + source labels
+                    
+                    # Forward pass on combined input
+                    residual_combined, features_fda = model_cnn(x_train_combined, training=True, return_features=True)
+                    x_corrected_combined = x_train_combined + residual_combined
+                    
+                elif fda_samples == 0:
+                    # Pure source training (scaled with FDA parameters)
+                    residual_src, features_fda = model_cnn(x_src_scaled_with_fda_params, training=True, return_features=True)
+                    x_corrected_combined = x_src_scaled_with_fda_params + residual_src
+                    y_train_combined = y_src_scaled_with_fda_params  # Source labels in FDA scaling space
+                    residual_combined = residual_src
+                else:
+                    # Pure FDA training (fully translated pairs using TARGET INPUT style for labels)
+                    residual_fda, features_fda = model_cnn(x_fda_scaled, training=True, return_features=True)
+                    x_corrected_combined = x_fda_scaled + residual_fda
+                    y_train_combined = y_fda_scaled  # FDA-translated labels using TARGET INPUT style
+                    residual_combined = residual_fda
+                
+                # Estimation loss: Both inputs and labels in FDA scaling space
+                est_loss = loss_fn_est(y_train_combined, x_corrected_combined)
+                    
+            else:
+                # Pure FDA training: Use FULLY translated pairs (TARGET INPUT style for labels)
+                residual_fda, features_fda = model_cnn(x_fda_scaled, training=True, return_features=True)
+                x_corrected_fda = x_fda_scaled + residual_fda
+                residual_combined = residual_fda
+                
+                # Estimation loss: FDA-corrected input vs FDA-translated labels (labels use TARGET INPUT style)
+                est_loss = loss_fn_est(y_fda_scaled, x_corrected_fda)
+            
+            # === FLOW 2: RAW TARGET INPUT (For CORAL alignment) ===
+            # Get features from raw target domain for CORAL comparison
+            residual_tgt_raw, features_tgt_raw = model_cnn(x_scaled_tgt, training=False, return_features=True)
+            # Note: training=False to prevent this flow from affecting main training gradients
+            
+            # === CORAL LOSS: Align FDA Features with Raw Target Features ===
+            if domain_weight > 0:
+                coral_loss = coral_loss_fn(features_fda, features_tgt_raw)
+            else:
+                coral_loss = 0.0
+            
+            # === REGULARIZATION LOSSES ===
+            # Residual regularization: Encourage small, meaningful corrections
+            residual_reg = 0.001 * tf.reduce_mean(tf.square(residual_combined))
+            
+            # Smoothness loss (optional)
+            if temporal_weight != 0 or frequency_weight != 0:
+                if fda_weight < 1.0:
+                    smoothness_loss = compute_total_smoothness_loss(x_corrected_combined, 
+                                                                temporal_weight=temporal_weight, 
+                                                                frequency_weight=frequency_weight)
+                else:
+                    smoothness_loss = compute_total_smoothness_loss(x_corrected_fda, 
+                                                                temporal_weight=temporal_weight, 
+                                                                frequency_weight=frequency_weight)
+            else:
+                smoothness_loss = 0.0
+            
+            # === TOTAL LOSS ===
+            total_loss = (est_weight * est_loss + 
+                        domain_weight * coral_loss +   # CORAL feature alignment
+                        residual_reg + 
+                        smoothness_loss)
+            
+            # Add L2 regularization from model
+            if model_cnn.losses:
+                total_loss += tf.add_n(model_cnn.losses)
+
+        # ============ MONITOR TARGET PERFORMANCE (OPTIONAL) ============
+        # Monitor target domain performance using traditional scaling
+        y_tgt_real = complx2real(y_tgt)
+        y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
+        y_scaled_tgt, _, _ = minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+        
+        x_corrected_tgt = x_scaled_tgt + residual_tgt_raw
+        est_loss_tgt = loss_fn_est(y_scaled_tgt, x_corrected_tgt)
+        epoc_loss_est_target += est_loss_tgt.numpy() * x_tgt.shape[0]
+        
+        # === Save features if required ===
+        if save_features and domain_weight != 0:
+            # Save FDA features
+            features_np_fda = features_fda[-1].numpy()
+            if features_dataset_source is None:
+                features_dataset_source = features_h5_source.create_dataset(
+                    'features',
+                    data=features_np_fda,
+                    maxshape=(None,) + features_np_fda.shape[1:],
+                    chunks=True
+                )
+            else:
+                features_dataset_source.resize(features_dataset_source.shape[0] + features_np_fda.shape[0], axis=0)
+                features_dataset_source[-features_np_fda.shape[0]:] = features_np_fda
+                
+            # Save raw target features
+            features_np_target = features_tgt_raw[-1].numpy()
+            if features_dataset_target is None:
+                features_dataset_target = features_h5_target.create_dataset(
+                    'features',
+                    data=features_np_target,
+                    maxshape=(None,) + features_np_target.shape[1:],
+                    chunks=True
+                )
+            else:
+                features_dataset_target.resize(features_dataset_target.shape[0] + features_np_target.shape[0], axis=0)
+                features_dataset_target[-features_np_target.shape[0]:] = features_np_target
+        
+        # Single optimizer update
+        grads = tape.gradient(total_loss, model_cnn.trainable_variables)
+        optimizer.apply_gradients(zip(grads, model_cnn.trainable_variables))
+        
+        # Track metrics
+        epoc_loss_total += total_loss.numpy() * x_src.shape[0]
+        epoc_loss_est += est_loss.numpy() * x_src.shape[0]
+        epoc_loss_coral += coral_loss.numpy() * x_src.shape[0] if domain_weight > 0 else 0.0
+        epoc_residual_norm += tf.reduce_mean(tf.abs(residual_combined)).numpy() * x_src.shape[0]
+    
+    # Close feature files
+    if save_features and domain_weight != 0:    
+        features_h5_source.close()
+        features_h5_target.close()
+    
+    # Calculate averages
+    avg_loss_total = epoc_loss_total / N_train
+    avg_loss_est = epoc_loss_est / N_train
+    avg_loss_est_target = epoc_loss_est_target / N_train
+    avg_loss_coral = epoc_loss_coral / N_train
+    avg_residual_norm = epoc_residual_norm / N_train
+    avg_fda_effect_input = epoc_fda_effect_input / N_train
+    avg_fda_effect_label = epoc_fda_effect_label / N_train
+    
+    # Print enhanced FDA + CORAL statistics
+    print(f"    FDA Full Translation + CORAL residual norm (avg): {avg_residual_norm:.6f}")
+    print(f"    FDA input translation effect (Source→Target INPUT): {avg_fda_effect_input:.6f}")
+    print(f"    FDA label translation effect (Source Labels→Target INPUT style): {avg_fda_effect_label:.6f}")
+    print(f"    CORAL feature alignment loss: {avg_loss_coral:.6f}")
+    print(f"    FDA window: {fda_win_h}x{fda_win_w}, weight: {fda_weight}")
+    print(f"    Training: Source→Target input style + Source labels→Target INPUT style + CORAL alignment")
+    
+    # Return compatible structure
+    return train_step_Output(
+        avg_epoc_loss_est=avg_loss_est,
+        avg_epoc_loss_domain=avg_loss_coral,  # CORAL alignment loss
+        avg_epoc_loss=avg_loss_total,
+        avg_epoc_loss_est_target=avg_loss_est_target,
+        features_source=features_fda[-1] if features_fda is not None else None,
+        film_features_source=features_fda[-1] if features_fda is not None else None,
+        avg_epoc_loss_d=0.0  # No discriminator
+    )
+
 ### Input Domain translation 
 class CycleGANGenerator(tf.keras.Model):
     """Generator for CycleGAN B→A translation"""
