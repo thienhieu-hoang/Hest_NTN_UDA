@@ -47,6 +47,7 @@ lower_range = -1
 # }
 # print('adv_weight = ', weights['adv_weight'], ', est_weight = ', weights['est_weight'], ', domain_weight = ', weights['domain_weight'])
 
+print("CORAL, reconstruction training first then domain adaptation training, domain weight 0.01 → 1.5, est weight 1.5 → 0.8, warmup epochs 80")
 scheduler = WeightScheduler(strategy='reconstruction_first', start_domain_weight=0.01, end_domain_weight=1.5,
                             start_est_weight=1.5, end_est_weight=0.8, warmup_epochs=80) 
                             # adv_weight = 0.005 default
@@ -166,7 +167,7 @@ n_epochs= 5
 epoch_min = 0
 epoch_step = 1
 
-sub_folder_ = ['GAN_practical']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
+sub_folder_ = ['GAN_linear']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
 
 for sub_folder in sub_folder_:
     print(f"Processing: {sub_folder}")
@@ -257,7 +258,8 @@ for sub_folder in sub_folder_:
     perform_to_save = {}    # list to save to .mat file for nmse, losses,...
 
     # 
-    model = CNNGenerator(extract_layers=['block_5','block_6'])
+    model = CNNGenerator(n_blocks=4)
+    print("4 blocks, CORAL, extrac layers = blocks 2, 3")
     # 
     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4, beta_1=0.5, beta_2=0.9)
     # 
