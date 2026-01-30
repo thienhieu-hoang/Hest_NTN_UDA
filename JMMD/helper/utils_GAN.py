@@ -410,12 +410,33 @@ class JMMDLoss(keras.layers.Layer):
     Joint Maximum Mean Discrepancy Loss in TensorFlow
     Computes JMMD across multiple feature layers
     """
-    def __init__(self, kernel_type='rbf', kernel_mul=2.0, kernel_num=5, fix_sigma=None, **kwargs):
+    def __init__(self, kernel_type='rbf', kernel_mul=2.0, kernel_num=5, fix_sigma=None,
+                    enable_pooling=False, **kwargs):
         super(JMMDLoss, self).__init__(**kwargs)
         self.kernel_type = kernel_type
         self.kernel_mul = kernel_mul
         self.kernel_num = kernel_num
         self.fix_sigma = fix_sigma
+        self.enable_pooling = enable_pooling
+    
+        if enable_pooling:
+            print(f"JMMDLoss initialized with global pooling enabled")
+        else:
+            print(f"JMMDLoss initialized without pooling")
+    
+    def _pool_feature(self, feature):
+        """
+        Apply global average pooling to a single feature tensor
+        """
+        if len(feature.shape) == 4:  # [B, H, W, C]
+            return tf.reduce_mean(feature, axis=[1, 2])
+        elif len(feature.shape) == 3:  # [B, H, C] or [B, W, C]
+            return tf.reduce_mean(feature, axis=1)
+        elif len(feature.shape) == 2:  # [B, C] - already pooled
+            return feature
+        else:
+            # Flatten and return
+            return tf.reshape(feature, [tf.shape(feature)[0], -1])
     
     def gaussian_kernel(self, source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
         """
@@ -461,18 +482,27 @@ class JMMDLoss(keras.layers.Layer):
     
     def call(self, source_list, target_list):
         """
-        Compute JMMD across multiple layers
+        Compute JMMD across multiple layers with optional pooling
         source_list: list of source features from different layers
         target_list: list of target features from different layers
         """
         jmmd_loss = 0.0
         for source_feat, target_feat in zip(source_list, target_list):
-            # Flatten features if needed
-            if len(source_feat.shape) > 2:
-                source_feat = tf.reshape(source_feat, [tf.shape(source_feat)[0], -1])
-                target_feat = tf.reshape(target_feat, [tf.shape(target_feat)[0], -1])
+            # === APPLY POOLING IF ENABLED ===
+            if self.enable_pooling:
+                source_pooled = self._pool_feature(source_feat)
+                target_pooled = self._pool_feature(target_feat)
+            else:
+                # Flatten if not pooling
+                if len(source_feat.shape) > 2:
+                    source_pooled = tf.reshape(source_feat, [tf.shape(source_feat)[0], -1])
+                    target_pooled = tf.reshape(target_feat, [tf.shape(target_feat)[0], -1])
+                else:
+                    source_pooled = source_feat
+                    target_pooled = target_feat
             
-            jmmd_loss += self.mmd(source_feat, target_feat)
+            # Compute MMD for this layer
+            jmmd_loss += self.mmd(source_pooled, target_pooled)
         
         return jmmd_loss / len(source_list)
 
@@ -7146,7 +7176,7 @@ def train_step_cnn_residual_fda_jmmd_rawThenScale(model_cnn, loader_H, loss_fn, 
     
     # Initialize JMMD loss if not provided
     if jmmd_loss_fn is None:
-        jmmd_loss_fn = JMMDLossNormalized()
+        jmmd_loss_fn = JMMDLoss()
     
     epoc_loss_total = 0.0
     epoc_loss_est = 0.0
@@ -7436,7 +7466,7 @@ def train_step_cnn_residual_fda_jmmd_rawThenScale_domainAware(model_cnn, loader_
     
     # Initialize JMMD loss if not provided
     if jmmd_loss_fn is None:
-        jmmd_loss_fn = JMMDLossNormalized()
+        jmmd_loss_fn = JMMDLoss()
     
     epoc_loss_total = 0.0
     epoc_loss_est = 0.0
@@ -7791,7 +7821,7 @@ def val_step_cnn_residual_fda_jmmd_rawThenScale_domainAware(model_cnn, loader_H,
     
     # Initialize JMMD loss if not provided
     if jmmd_loss_fn is None:
-        jmmd_loss_fn = JMMDLossNormalized()
+        jmmd_loss_fn = JMMDLoss()
     
     N_val_source = 0
     N_val_target = 0
@@ -9053,6 +9083,517 @@ def train_step_cnn_residual_FDAfullTranslation1_coral(model_cnn, loader_H, loss_
         film_features_source=features_fda[-1] if features_fda is not None else None,
         avg_epoc_loss_d=0.0  # No discriminator
     )
+    
+
+
+def train_step_cnn_residual_FDAfullTranslation1_jmmd(model_cnn, loader_H, loss_fn, optimizer, lower_range=-1, 
+                                            save_features=False, nsymb=14, weights=None, linear_interp=False,
+                                            fda_win_h=13, fda_win_w=3, fda_weight=1.0, jmmd_loss_fn=None):
+    """
+    CNN-only residual training step combining FDA Full Translation 1 + JMMD domain adaptation
+    
+    Workflow:
+    1. RAW FDA FULL Translation: Source input → Target style input AND 
+                                Source labels → Target style labels
+    2. Scale FDA outputs with shared parameters for consistency
+    3. JMMD Loss: Align features between FDA-translated and raw target domains
+    4. Residual learning: Train CNN to predict corrections
+    
+    Training pairs:
+    - Input: Source content + Target style (FDA-mixed input, then scaled)
+    - Label: Source labels + Target INPUT style (FDA-mixed labels using TARGET INPUT as style)
+    - Feature alignment: JMMD loss between FDA features and raw target features
+    
+    Args:
+        model_cnn: CNN model (CNNGenerator instance)
+        loader_H: tuple of loaders
+        loss_fn: tuple of loss functions (only first one used)
+        optimizer: single optimizer for CNN
+        lower_range: lower range for min-max scaling
+        save_features: bool, whether to save features
+        nsymb: number of symbols  
+        weights: weight dictionary
+        linear_interp: linear interpolation flag
+        fda_win_h: FDA window height (default 13)
+        fda_win_w: FDA window width (default 3)
+        fda_weight: Weight for FDA vs source training (1.0 = 100% FDA)
+        jmmd_loss_fn: JMMD loss function instance (if None, will create default)
+    """
+    loader_H_input_train_src, loader_H_true_train_src, \
+        loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
+    loss_fn_est = loss_fn[0]  # Only need estimation loss
+    
+    est_weight = weights.get('est_weight', 1.0) if weights else 1.0
+    domain_weight = weights.get('domain_weight', 1.0) if weights else 1.0
+    temporal_weight = weights.get('temporal_weight', 0.0) if weights else 0.0
+    frequency_weight = weights.get('frequency_weight', 0.0) if weights else 0.0
+    
+    # Initialize JMMD loss if not provided
+    if jmmd_loss_fn is None:
+        jmmd_loss_fn = JMMDLoss()
+    
+    epoc_loss_total = 0.0
+    epoc_loss_est = 0.0
+    epoc_loss_est_target = 0.0
+    epoc_loss_jmmd = 0.0
+    epoc_residual_norm = 0.0
+    epoc_fda_effect_input = 0.0
+    epoc_fda_effect_label = 0.0
+    N_train = 0
+    
+    # Initialize feature variables
+    features_fda = None
+    features_tgt_raw = None
+    
+    if save_features and domain_weight != 0:
+        features_h5_path_source = 'features_source.h5'
+        if os.path.exists(features_h5_path_source):
+            os.remove(features_h5_path_source)
+        features_h5_source = h5py.File(features_h5_path_source, 'w')
+        features_dataset_source = None
+
+        features_h5_path_target = 'features_target.h5'
+        if os.path.exists(features_h5_path_target):
+            os.remove(features_h5_path_target)   
+        features_h5_target = h5py.File(features_h5_path_target, 'w')
+        features_dataset_target = None
+
+    def _pool_feature_list(feat_list):
+        pooled = []
+        for f in feat_list:
+            if len(f.shape) == 4:   # [B, H, W, C]
+                pooled.append(tf.reduce_mean(f, axis=[1, 2]))
+            elif len(f.shape) == 3: # [B, H, C] or [B, W, C]
+                pooled.append(tf.reduce_mean(f, axis=1))
+            elif len(f.shape) == 2: # [B, C]
+                pooled.append(f)
+            else:
+                pooled.append(tf.reshape(f, [tf.shape(f)[0], -1]))
+        return pooled
+    
+    for batch_idx in range(loader_H_true_train_src.total_batches):
+        # Get data
+        x_src = loader_H_input_train_src.next_batch()
+        y_src = loader_H_true_train_src.next_batch()
+        x_tgt = loader_H_input_train_tgt.next_batch()
+        y_tgt = loader_H_true_train_tgt.next_batch()  # Not used in label translation
+        N_train += x_src.shape[0]
+
+        # Preprocess data to real format (NO SCALING YET)
+        x_src_real = complx2real(x_src)
+        y_src_real = complx2real(y_src)
+        x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
+        y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
+
+        x_tgt_real = complx2real(x_tgt)
+        x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
+
+        # ============ STEP 1: RAW FDA INPUT TRANSLATION (Source→Target INPUT) ============
+        x_src_complex = tf.complex(x_src_real[:,:,:,0], x_src_real[:,:,:,1])
+        x_tgt_complex = tf.complex(x_tgt_real[:,:,:,0], x_tgt_real[:,:,:,1])
+        
+        src_amplitude_input, src_phase_input = F_extract_DD(x_src_complex)
+        tgt_amplitude_input, tgt_phase_input = F_extract_DD(x_tgt_complex)
+        mixed_amplitude_input = fda_mix_pixels(src_amplitude_input, tgt_amplitude_input, fda_win_h, fda_win_w)
+        mixed_complex_dd_input = apply_phase_to_amplitude(mixed_amplitude_input, src_phase_input)
+        x_fda_mixed_complex = F_inverse_DD(mixed_complex_dd_input)
+        x_fda_mixed_real = tf.stack([tf.math.real(x_fda_mixed_complex), tf.math.imag(x_fda_mixed_complex)], axis=-1)
+        
+        fda_difference_input = tf.reduce_mean(tf.abs(x_fda_mixed_real - x_src_real))
+        epoc_fda_effect_input += fda_difference_input.numpy() * x_src.shape[0]
+        
+        # ============ STEP 2: RAW FDA LABEL TRANSLATION (Source Labels→Target INPUT Style) ============
+        y_src_complex = tf.complex(y_src_real[:,:,:,0], y_src_real[:,:,:,1])
+        src_amplitude_label, src_phase_label = F_extract_DD(y_src_complex)
+        tgt_amplitude_style, tgt_phase_style = F_extract_DD(x_tgt_complex)
+        mixed_amplitude_label = fda_mix_pixels(src_amplitude_label, tgt_amplitude_style, fda_win_h, fda_win_w)
+        mixed_complex_dd_label = apply_phase_to_amplitude(mixed_amplitude_label, src_phase_label)
+        y_fda_mixed_complex = F_inverse_DD(mixed_complex_dd_label)
+        y_fda_mixed_real = tf.stack([tf.math.real(y_fda_mixed_complex), tf.math.imag(y_fda_mixed_complex)], axis=-1)
+        
+        fda_difference_label = tf.reduce_mean(tf.abs(y_fda_mixed_real - y_src_real))
+        epoc_fda_effect_label += fda_difference_label.numpy() * x_src.shape[0]
+        
+        # ============ STEP 3: SCALE FDA OUTPUTS WITH SHARED PARAMETERS ============
+        x_fda_mixed_numpy = x_fda_mixed_real.numpy()
+        x_fda_scaled, fda_min, fda_max = minmaxScaler(x_fda_mixed_numpy, lower_range=lower_range, linear_interp=linear_interp)
+        
+        batch_size = y_fda_mixed_real.shape[0]
+        if np.isscalar(fda_min):
+            fda_min_array = np.tile([[fda_min, fda_min]], (batch_size, 1))
+            fda_max_array = np.tile([[fda_max, fda_max]], (batch_size, 1))
+        else:
+            fda_min_array = fda_min if fda_min.shape == (batch_size, 2) else np.tile(fda_min, (batch_size, 1))
+            fda_max_array = fda_max if fda_max.shape == (batch_size, 2) else np.tile(fda_max, (batch_size, 1))
+        
+        y_fda_mixed_numpy = y_fda_mixed_real.numpy()
+        y_fda_scaled, _, _ = minmaxScaler(y_fda_mixed_numpy, min_pre=fda_min_array, max_pre=fda_max_array, 
+                                        lower_range=lower_range, linear_interp=linear_interp)
+        
+        # ============ STEP 4: SCALE TARGET FOR JMMD COMPARISON ============
+        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+        
+        # ============ STEP 5: SCALE SOURCE DATA WITH FDA PARAMETERS FOR HYBRID TRAINING ============
+        x_src_scaled_with_fda_params, _, _ = minmaxScaler(x_src_real, min_pre=fda_min_array, max_pre=fda_max_array, 
+                                                        lower_range=lower_range, linear_interp=linear_interp)
+        y_src_scaled_with_fda_params, _, _ = minmaxScaler(y_src_real, min_pre=fda_min_array, max_pre=fda_max_array, 
+                                                        lower_range=lower_range, linear_interp=linear_interp)
+
+        # ============ STEP 6: DUAL FLOW CNN TRAINING + JMMD ALIGNMENT ============
+        with tf.GradientTape() as tape:
+            batch_size_int = x_fda_scaled.shape[0]
+            
+            if fda_weight < 1.0:
+                fda_samples = int(batch_size_int * fda_weight)
+                remaining_samples = batch_size_int - fda_samples
+                
+                if fda_samples > 0 and remaining_samples > 0:
+                    x_train_fda = x_fda_scaled[:fda_samples]
+                    y_train_fda = y_fda_scaled[:fda_samples]
+                    x_train_src = x_src_scaled_with_fda_params[fda_samples:]
+                    y_train_src = y_src_scaled_with_fda_params[fda_samples:]
+                    
+                    x_train_combined = tf.concat([x_train_fda, x_train_src], axis=0)
+                    y_train_combined = tf.concat([y_train_fda, y_train_src], axis=0)
+                    
+                    residual_combined, features_fda = model_cnn(x_train_combined, training=True, return_features=True)
+                    x_corrected_combined = x_train_combined + residual_combined
+                    
+                elif fda_samples == 0:
+                    residual_src, features_fda = model_cnn(x_src_scaled_with_fda_params, training=True, return_features=True)
+                    x_corrected_combined = x_src_scaled_with_fda_params + residual_src
+                    y_train_combined = y_src_scaled_with_fda_params
+                    residual_combined = residual_src
+                else:
+                    residual_fda, features_fda = model_cnn(x_fda_scaled, training=True, return_features=True)
+                    x_corrected_combined = x_fda_scaled + residual_fda
+                    y_train_combined = y_fda_scaled
+                    residual_combined = residual_fda
+                
+                est_loss = loss_fn_est(y_train_combined, x_corrected_combined)
+                    
+            else:
+                residual_fda, features_fda = model_cnn(x_fda_scaled, training=True, return_features=True)
+                x_corrected_fda = x_fda_scaled + residual_fda
+                residual_combined = residual_fda
+                est_loss = loss_fn_est(y_fda_scaled, x_corrected_fda)
+            
+            residual_tgt_raw, features_tgt_raw = model_cnn(x_scaled_tgt, training=False, return_features=True)
+            
+            if domain_weight > 0:
+                jmmd_loss = jmmd_loss_fn(features_fda, features_tgt_raw)
+            else:
+                jmmd_loss = 0.0
+            
+            residual_reg = 0.001 * tf.reduce_mean(tf.square(residual_combined))
+            
+            if temporal_weight != 0 or frequency_weight != 0:
+                if fda_weight < 1.0:
+                    smoothness_loss = compute_total_smoothness_loss(x_corrected_combined, 
+                                                                temporal_weight=temporal_weight, 
+                                                                frequency_weight=frequency_weight)
+                else:
+                    smoothness_loss = compute_total_smoothness_loss(x_corrected_fda, 
+                                                                temporal_weight=temporal_weight, 
+                                                                frequency_weight=frequency_weight)
+            else:
+                smoothness_loss = 0.0
+            
+            total_loss = (est_weight * est_loss + 
+                        domain_weight * jmmd_loss +   
+                        residual_reg + 
+                        smoothness_loss)
+            
+            if model_cnn.losses:
+                total_loss += tf.add_n(model_cnn.losses)
+
+        y_tgt_real = complx2real(y_tgt)
+        y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
+        y_scaled_tgt, _, _ = minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+        
+        x_corrected_tgt = x_scaled_tgt + residual_tgt_raw
+        est_loss_tgt = loss_fn_est(y_scaled_tgt, x_corrected_tgt)
+        epoc_loss_est_target += est_loss_tgt.numpy() * x_tgt.shape[0]
+        
+        if save_features and domain_weight != 0:
+            features_np_fda = features_fda[-1].numpy()
+            if features_dataset_source is None:
+                features_dataset_source = features_h5_source.create_dataset(
+                    'features',
+                    data=features_np_fda,
+                    maxshape=(None,) + features_np_fda.shape[1:],
+                    chunks=True
+                )
+            else:
+                features_dataset_source.resize(features_dataset_source.shape[0] + features_np_fda.shape[0], axis=0)
+                features_dataset_source[-features_np_fda.shape[0]:] = features_np_fda
+                
+            features_np_target = features_tgt_raw[-1].numpy()
+            if features_dataset_target is None:
+                features_dataset_target = features_h5_target.create_dataset(
+                    'features',
+                    data=features_np_target,
+                    maxshape=(None,) + features_np_target.shape[1:],
+                    chunks=True
+                )
+            else:
+                features_dataset_target.resize(features_dataset_target.shape[0] + features_np_target.shape[0], axis=0)
+                features_dataset_target[-features_np_target.shape[0]:] = features_np_target
+        
+        grads = tape.gradient(total_loss, model_cnn.trainable_variables)
+        optimizer.apply_gradients(zip(grads, model_cnn.trainable_variables))
+        
+        epoc_loss_total += total_loss.numpy() * x_src.shape[0]
+        epoc_loss_est += est_loss.numpy() * x_src.shape[0]
+        epoc_loss_jmmd += jmmd_loss.numpy() * x_src.shape[0] if domain_weight > 0 else 0.0
+        epoc_residual_norm += tf.reduce_mean(tf.abs(residual_combined)).numpy() * x_src.shape[0]
+    
+    if save_features and domain_weight != 0:    
+        features_h5_source.close()
+        features_h5_target.close()
+    
+    avg_loss_total = epoc_loss_total / N_train
+    avg_loss_est = epoc_loss_est / N_train
+    avg_loss_est_target = epoc_loss_est_target / N_train
+    avg_loss_jmmd = epoc_loss_jmmd / N_train
+    avg_residual_norm = epoc_residual_norm / N_train
+    avg_fda_effect_input = epoc_fda_effect_input / N_train
+    avg_fda_effect_label = epoc_fda_effect_label / N_train
+    
+    print(f"    FDA Full Translation + JMMD residual norm (avg): {avg_residual_norm:.6f}")
+    print(f"    FDA input translation effect (Source→Target INPUT): {avg_fda_effect_input:.6f}")
+    print(f"    FDA label translation effect (Source Labels→Target INPUT style): {avg_fda_effect_label:.6f}")
+    print(f"    JMMD feature alignment loss: {avg_loss_jmmd:.6f}")
+    print(f"    FDA window: {fda_win_h}x{fda_win_w}, weight: {fda_weight}")
+    
+    return train_step_Output(
+        avg_epoc_loss_est=avg_loss_est,
+        avg_epoc_loss_domain=avg_loss_jmmd,
+        avg_epoc_loss=avg_loss_total,
+        avg_epoc_loss_est_target=avg_loss_est_target,
+        features_source=features_fda[-1] if features_fda is not None else None,
+        film_features_source=features_fda[-1] if features_fda is not None else None,
+        avg_epoc_loss_d=0.0
+    )
+
+def val_step_cnn_residual_jmmd(model_cnn, loader_H, loss_fn, lower_range, nsymb=14, weights=None, 
+                                jmmd_loss_fn=None, linear_interp=False, return_H_gen=False):
+    """
+    Validation step for CNN-only residual learning with JMMD domain adaptation (no discriminator)
+    
+    Args:
+        model_cnn: CNN model (CNNGenerator instance, not GAN wrapper)
+        loader_H: tuple of validation loaders
+        loss_fn: tuple of loss functions (only first one used)
+        lower_range: lower range for min-max scaling
+        nsymb: number of symbols
+        weights: weight dictionary
+        jmmd_loss_fn: JMMD loss function instance (if None, will create default)
+        linear_interp: linear interpolation flag
+        return_H_gen: whether to return generated H matrices
+    """
+    loader_H_input_val_source, loader_H_true_val_source, loader_H_input_val_target, loader_H_true_val_target = loader_H
+    loss_fn_est = loss_fn[0]  # Only need estimation loss
+    
+    est_weight = weights.get('est_weight', 1.0) if weights else 1.0
+    domain_weight = weights.get('domain_weight', 1.0) if weights else 1.0
+    temporal_weight = weights.get('temporal_weight', 0.0) if weights else 0.0
+    frequency_weight = weights.get('frequency_weight', 0.0) if weights else 0.0
+    
+    # Initialize JMMD loss if not provided
+    if jmmd_loss_fn is None:
+        jmmd_loss_fn = JMMDLoss()
+    
+    N_val_source = 0
+    N_val_target = 0
+    epoc_loss_est_source = 0.0
+    epoc_loss_est_target = 0.0
+    epoc_nmse_val_source = 0.0
+    epoc_nmse_val_target = 0.0
+    epoc_jmmd_loss = 0.0
+    epoc_smoothness_loss = 0.0
+    epoc_residual_norm = 0.0  # Track residual magnitude during validation
+    H_sample = []
+    
+    if return_H_gen:
+        all_H_gen_src = []
+        all_H_gen_tgt = []
+
+    for idx in range(loader_H_true_val_source.total_batches):
+        # Get and preprocess data (same as CORAL version)
+        x_src = loader_H_input_val_source.next_batch()
+        y_src = loader_H_true_val_source.next_batch()
+        x_tgt = loader_H_input_val_target.next_batch()
+        y_tgt = loader_H_true_val_target.next_batch()
+        N_val_source += x_src.shape[0]
+        N_val_target += x_tgt.shape[0]
+
+        # Preprocessing (same as original)
+        x_src_real = complx2real(x_src)
+        y_src_real = complx2real(y_src)
+        x_src_real = np.transpose(x_src_real, (0, 2, 3, 1))
+        y_src_real = np.transpose(y_src_real, (0, 2, 3, 1))
+        x_scaled_src, x_min_src, x_max_src = minmaxScaler(x_src_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_src, _, _ = minmaxScaler(y_src_real, min_pre=x_min_src, max_pre=x_max_src, lower_range=lower_range)
+
+        x_tgt_real = complx2real(x_tgt)
+        y_tgt_real = complx2real(y_tgt)
+        x_tgt_real = np.transpose(x_tgt_real, (0, 2, 3, 1))
+        y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
+        x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
+        y_scaled_tgt, _, _ = minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+
+        # === RESIDUAL LEARNING: Source domain prediction ===
+        residual_src, features_src = model_cnn(x_scaled_src, training=False, return_features=True)
+        preds_src = x_scaled_src + residual_src  # Apply residual correction
+        
+        # Safe tensor conversion
+        if hasattr(preds_src, 'numpy'):
+            preds_src_numpy = preds_src.numpy()
+        else:
+            preds_src_numpy = preds_src
+            
+        preds_src_descaled = deMinMax(preds_src_numpy, x_min_src, x_max_src, lower_range=lower_range)
+        batch_est_loss_source = loss_fn_est(y_scaled_src, preds_src).numpy()
+        epoc_loss_est_source += batch_est_loss_source * x_src.shape[0]
+        mse_val_source = np.mean((preds_src_descaled - y_src_real) ** 2, axis=(1, 2, 3))
+        power_source = np.mean(y_src_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_source += np.mean(mse_val_source / (power_source + 1e-30)) * x_src.shape[0]
+
+        # === RESIDUAL LEARNING: Target domain prediction ===
+        residual_tgt, features_tgt = model_cnn(x_scaled_tgt, training=False, return_features=True)
+        preds_tgt = x_scaled_tgt + residual_tgt  # Apply residual correction
+        
+        # Safe tensor conversion
+        if hasattr(preds_tgt, 'numpy'):
+            preds_tgt_numpy = preds_tgt.numpy()
+        else:
+            preds_tgt_numpy = preds_tgt
+            
+        preds_tgt_descaled = deMinMax(preds_tgt_numpy, x_min_tgt, x_max_tgt, lower_range=lower_range)
+        batch_est_loss_target = loss_fn_est(y_scaled_tgt, preds_tgt).numpy()
+        epoc_loss_est_target += batch_est_loss_target * x_tgt.shape[0]
+        mse_val_target = np.mean((preds_tgt_descaled - y_tgt_real) ** 2, axis=(1, 2, 3))
+        power_target = np.mean(y_tgt_real ** 2, axis=(1, 2, 3))
+        epoc_nmse_val_target += np.mean(mse_val_target / (power_target + 1e-30)) * x_tgt.shape[0]
+
+        # Track residual magnitudes during validation
+        residual_src_norm = tf.reduce_mean(tf.square(residual_src)).numpy()
+        residual_tgt_norm = tf.reduce_mean(tf.square(residual_tgt)).numpy()
+        epoc_residual_norm += (residual_src_norm + residual_tgt_norm) / 2 * x_src.shape[0]
+
+        # === JMMD Loss (on residual features) ===
+        if domain_weight > 0:
+            jmmd_loss = jmmd_loss_fn(features_src, features_tgt)
+            epoc_jmmd_loss += jmmd_loss.numpy() * x_src.shape[0]
+        
+        # === Smoothness loss (on corrected channels) ===
+        if temporal_weight != 0 or frequency_weight != 0:
+            preds_src_tensor = tf.convert_to_tensor(preds_src_numpy) if not tf.is_tensor(preds_src) else preds_src
+            preds_tgt_tensor = tf.convert_to_tensor(preds_tgt_numpy) if not tf.is_tensor(preds_tgt) else preds_tgt
+            
+            smoothness_loss_src = compute_total_smoothness_loss(
+                preds_src_tensor, temporal_weight=temporal_weight, frequency_weight=frequency_weight
+            )
+            smoothness_loss_tgt = compute_total_smoothness_loss(
+                preds_tgt_tensor, temporal_weight=temporal_weight, frequency_weight=frequency_weight
+            )
+            batch_smoothness_loss = (smoothness_loss_src + smoothness_loss_tgt) / 2
+            epoc_smoothness_loss += batch_smoothness_loss.numpy() * x_src.shape[0]
+
+        # === Save H samples ===
+        if idx == 0:
+            n_samples = min(3, x_src_real.shape[0], x_tgt_real.shape[0])
+            # Source samples
+            H_true_sample = y_src_real[:n_samples].copy()
+            H_input_sample = x_src_real[:n_samples].copy()
+            if hasattr(preds_src_descaled, 'numpy'):
+                H_est_sample = preds_src_descaled[:n_samples].numpy().copy()
+            else:
+                H_est_sample = preds_src_descaled[:n_samples].copy()
+            
+            mse_sample_source = np.mean((H_est_sample - H_true_sample) ** 2, axis=(1, 2, 3))
+            power_sample_source = np.mean(H_true_sample ** 2, axis=(1, 2, 3))
+            nmse_est_source = mse_sample_source / (power_sample_source + 1e-30)
+            mse_input_source = np.mean((H_input_sample - H_true_sample) ** 2, axis=(1, 2, 3))
+            nmse_input_source = mse_input_source / (power_sample_source + 1e-30)
+            
+            # Target samples
+            H_true_sample_target = y_tgt_real[:n_samples].copy()
+            H_input_sample_target = x_tgt_real[:n_samples].copy()
+            if hasattr(preds_tgt_descaled, 'numpy'):
+                H_est_sample_target = preds_tgt_descaled[:n_samples].numpy().copy()
+            else:
+                H_est_sample_target = preds_tgt_descaled[:n_samples].copy()
+            
+            mse_sample_target = np.mean((H_est_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            power_sample_target = np.mean(H_true_sample_target ** 2, axis=(1, 2, 3))
+            nmse_est_target = mse_sample_target / (power_sample_target + 1e-30)
+            mse_input_target = np.mean((H_input_sample_target - H_true_sample_target) ** 2, axis=(1, 2, 3))
+            nmse_input_target = mse_input_target / (power_sample_target + 1e-30)
+            
+            H_sample = [H_true_sample, H_input_sample, H_est_sample, nmse_input_source, nmse_est_source,
+                        H_true_sample_target, H_input_sample_target, H_est_sample_target, nmse_input_target, nmse_est_target]
+            
+        if return_H_gen:
+            # Convert to numpy if needed and append to lists
+            H_gen_src_batch = preds_src_descaled.numpy().copy() if hasattr(preds_src_descaled, 'numpy') else preds_src_descaled.copy()
+            H_gen_tgt_batch = preds_tgt_descaled.numpy().copy() if hasattr(preds_tgt_descaled, 'numpy') else preds_tgt_descaled.copy()
+            
+            all_H_gen_src.append(H_gen_src_batch)
+            all_H_gen_tgt.append(H_gen_tgt_batch)
+    
+    if return_H_gen:
+        H_gen_src_all = np.concatenate(all_H_gen_src, axis=0)
+        H_gen_tgt_all = np.concatenate(all_H_gen_tgt, axis=0)
+        H_gen = {
+            'H_gen_src': H_gen_src_all,
+            'H_gen_tgt': H_gen_tgt_all
+        }
+
+    # Calculate averages
+    avg_loss_est_source = epoc_loss_est_source / N_val_source
+    avg_loss_est_target = epoc_loss_est_target / N_val_target
+    avg_loss_est = (avg_loss_est_source + avg_loss_est_target) / 2
+    avg_nmse_source = epoc_nmse_val_source / N_val_source
+    avg_nmse_target = epoc_nmse_val_target / N_val_target
+    avg_nmse = (avg_nmse_source + avg_nmse_target) / 2
+    avg_jmmd_loss = epoc_jmmd_loss / N_val_source if epoc_jmmd_loss > 0 else 0.0
+    avg_smoothness_loss = epoc_smoothness_loss / N_val_source if epoc_smoothness_loss > 0 else 0.0
+    avg_residual_norm = epoc_residual_norm / N_val_source
+    
+    # Print residual statistics
+    print(f"    Validation residual norm (avg): {avg_residual_norm:.6f}")
+    print(f"    Validation JMMD loss: {avg_jmmd_loss:.6f}")
+    
+    # Domain accuracy placeholders (compatible with existing code)
+    avg_domain_acc_source = 0.5
+    avg_domain_acc_target = 0.5
+    avg_domain_acc = 0.5
+
+    # Total loss (no discriminator component)
+    avg_total_loss = est_weight * avg_loss_est + domain_weight * avg_jmmd_loss + avg_smoothness_loss
+
+    # Return compatible structure
+    epoc_eval_return = {
+        'avg_total_loss': avg_total_loss,
+        'avg_loss_est_source': avg_loss_est_source,
+        'avg_loss_est_target': avg_loss_est_target, 
+        'avg_loss_est': avg_loss_est,
+        'avg_gan_disc_loss': 0.0,  # No discriminator
+        'avg_domain_loss': avg_jmmd_loss,  # Use JMMD loss for compatibility with plotting
+        'avg_nmse_source': avg_nmse_source,
+        'avg_nmse_target': avg_nmse_target,
+        'avg_nmse': avg_nmse,
+        'avg_domain_acc_source': avg_domain_acc_source,
+        'avg_domain_acc_target': avg_domain_acc_target,
+        'avg_domain_acc': avg_domain_acc,
+        'avg_smoothness_loss': avg_smoothness_loss
+    }
+
+    if return_H_gen:
+        return H_sample, epoc_eval_return, H_gen
+    return H_sample, epoc_eval_return
 
 ### Input Domain translation 
 class CycleGANGenerator(tf.keras.Model):
