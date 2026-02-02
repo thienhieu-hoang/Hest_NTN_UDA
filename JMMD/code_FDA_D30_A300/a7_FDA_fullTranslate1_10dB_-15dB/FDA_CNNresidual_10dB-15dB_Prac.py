@@ -166,7 +166,7 @@ epoch_step = 20
 # epoch_min = 0
 # epoch_step = 1
 
-sub_folder_ = ['GAN_linear']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
+sub_folder_ = ['GAN_practical']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
 
 for sub_folder in sub_folder_:
     print(f"Processing: {sub_folder}")
