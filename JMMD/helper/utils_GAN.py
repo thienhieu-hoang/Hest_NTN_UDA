@@ -9607,8 +9607,7 @@ def val_step_cnn_residual_jmmd(model_cnn, loader_H, loss_fn, lower_range, nsymb=
 def train_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loader_H, loss_fn, optimizer, lower_range=-1, 
                                             save_features=False, nsymb=14, weights=None, linear_interp=False,
                                             fda_win_h=13, fda_win_w=3, fda_weight=1.0, coral_loss_fn=None,
-                                            consistency_weight=0.3, residual_consistency_weight=0.2,
-                                            improvement_consistency_weight=0.1, flag_residual_reg=True):
+                                            residual_consistency_weight=0.2, flag_residual_reg=True):
     """
     CNN-only residual training step combining FDA Full Translation 1 + CORAL + Domain-Aware Consistency
     
@@ -9747,7 +9746,6 @@ def train_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loa
         
         # ============ STEP 4: SCALE TARGET FOR CORAL & CONSISTENCY COMPARISON ============
         x_scaled_tgt, x_min_tgt, x_max_tgt = minmaxScaler(x_tgt_real, lower_range=lower_range, linear_interp=linear_interp)
-        y_scaled_tgt, _, _ = minmaxScaler(x_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
         
         # ============ STEP 5: SCALE SOURCE DATA WITH FDA PARAMETERS FOR HYBRID TRAINING ============
         x_src_scaled_with_fda_params, _, _ = minmaxScaler(x_src_real, min_pre=fda_min_array, max_pre=fda_max_array, 
@@ -9806,25 +9804,8 @@ def train_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loa
             else:
                 coral_loss = 0.0
             
-            # === DOMAIN-AWARE CONSISTENCY LOSSES ===
-            # 1. IMPROVEMENT RATIO CONSISTENCY ⭐ (YOUR MAIN IDEA)
-            if improvement_consistency_weight > 0:
-                # FDA domain: input error vs corrected error
-                fda_input_error = tf.reduce_mean(tf.abs(x_fda_scaled - y_fda_scaled), axis=[1,2,3])
-                fda_corrected_error = tf.reduce_mean(tf.abs(x_corrected_combined - y_fda_scaled), axis=[1,2,3]) if fda_weight < 1.0 else tf.reduce_mean(tf.abs(x_corrected_fda - y_fda_scaled), axis=[1,2,3])
-                fda_improvement = (fda_input_error - fda_corrected_error) / (fda_input_error + 1e-8)
-                
-                # Target domain: input error vs corrected error
-                tgt_input_error = tf.reduce_mean(tf.abs(x_scaled_tgt - y_scaled_tgt), axis=[1,2,3])
-                tgt_corrected_error = tf.reduce_mean(tf.abs(x_corrected_tgt - y_scaled_tgt), axis=[1,2,3])
-                tgt_improvement = (tgt_input_error - tgt_corrected_error) / (tgt_input_error + 1e-8)
-                
-                # Consistency: similar improvement percentages
-                improvement_consistency_loss = tf.reduce_mean(tf.square(fda_improvement - tgt_improvement))
-            else:
-                improvement_consistency_loss = 0.0
-            
-            # 2. RESIDUAL PATTERN CONSISTENCY ⭐ (GREAT FOR RESIDUAL LEARNING)
+            # === DOMAIN-AWARE CONSISTENCY ===            
+            # RESIDUAL PATTERN CONSISTENCY 
             if residual_consistency_weight > 0:
                 # Normalize residuals by input magnitude to account for domain differences
                 fda_input_magnitude = tf.abs(x_fda_scaled) + 1e-8
@@ -9838,27 +9819,6 @@ def train_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loa
                 residual_pattern_consistency = tf.reduce_mean(tf.square(fda_residual_normalized - tgt_residual_normalized))
             else:
                 residual_pattern_consistency = 0.0
-            
-            # 3. DIRECT CONSISTENCY (Traditional output similarity - optional)
-            if consistency_weight > 0:
-                # Direct output consistency (less suitable for your case but included for completeness)
-                batch_size_tensor = tf.shape(x_fda_scaled)[0]
-                min_batch_size = tf.minimum(batch_size_tensor, tf.shape(x_scaled_tgt)[0])
-                
-                # Take subset for consistency calculation
-                fda_subset = (x_corrected_combined if fda_weight < 1.0 else x_corrected_fda)[:min_batch_size]
-                tgt_subset = x_corrected_tgt[:min_batch_size]
-                
-                # Normalize by respective input magnitudes for fair comparison
-                fda_input_ref = tf.abs(x_fda_scaled[:min_batch_size]) + 1e-8
-                tgt_input_ref = tf.abs(x_scaled_tgt[:min_batch_size]) + 1e-8
-                
-                fda_normalized = fda_subset / fda_input_ref
-                tgt_normalized = tgt_subset / tgt_input_ref
-                
-                direct_consistency_loss = tf.reduce_mean(tf.square(fda_normalized - tgt_normalized))  
-            else:
-                direct_consistency_loss = 0.0  # ← FIXED: Consistent variable name
             
             # Residual regularization: Encourage small, meaningful corrections
             if flag_residual_reg:
@@ -9900,9 +9860,7 @@ def train_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loa
             # === TOTAL LOSS (WITH DOMAIN-AWARE CONSISTENCY) ===
             total_loss = (est_weight * est_loss + 
                         domain_weight * coral_loss +
-                        improvement_consistency_weight * improvement_consistency_loss +  # Improvement ratio consistency
-                        residual_consistency_weight * residual_pattern_consistency +    # Residual pattern consistency  
-                        consistency_weight * direct_consistency_loss +                  # ← FIXED: Correct variable name
+                        residual_consistency_weight * residual_pattern_consistency +    
                         residual_reg +                   
                         smoothness_loss)
             
@@ -9911,6 +9869,10 @@ def train_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loa
                 total_loss += tf.add_n(model_cnn.losses)
 
         # === MONITOR TARGET PERFORMANCE (separate target evaluation) ===
+        y_tgt_real = complx2real(y_tgt)
+        y_tgt_real = np.transpose(y_tgt_real, (0, 2, 3, 1))
+        y_scaled_tgt, _, _ = minmaxScaler(y_tgt_real, min_pre=x_min_tgt, max_pre=x_max_tgt, lower_range=lower_range)
+        
         est_loss_tgt = loss_fn_est(y_scaled_tgt, x_corrected_tgt)
         epoc_loss_est_target += est_loss_tgt.numpy() * x_tgt.shape[0]
         
@@ -9944,9 +9906,7 @@ def train_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loa
         epoc_loss_total += total_loss.numpy() * x_src.shape[0]
         epoc_loss_est += est_loss.numpy() * x_src.shape[0]
         epoc_loss_coral += coral_loss.numpy() * x_src.shape[0] if domain_weight > 0 else 0.0
-        epoc_loss_improvement_consistency += improvement_consistency_loss.numpy() * x_src.shape[0]  
-        epoc_loss_residual_consistency += residual_pattern_consistency.numpy() * x_src.shape[0]      
-        epoc_loss_direct_consistency += direct_consistency_loss.numpy() * x_src.shape[0]  
+        epoc_loss_residual_consistency += residual_pattern_consistency.numpy() * x_src.shape[0]    
         epoc_residual_norm += tf.reduce_mean(tf.abs(residual_combined)).numpy() * x_src.shape[0]
     
     # Close feature files
@@ -9979,7 +9939,7 @@ def train_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loa
     # Return compatible structure
     return train_step_Output(
         avg_epoc_loss_est=avg_loss_est,
-        avg_epoc_loss_domain=avg_loss_coral + avg_loss_improvement_consistency + avg_loss_residual_consistency,  # ← FIXED: Consistent variable names
+        avg_epoc_loss_domain=avg_loss_coral  + avg_loss_residual_consistency,  # consider adding residual_reg if needed
         avg_epoc_loss=avg_loss_total,
         avg_epoc_loss_est_target=avg_loss_est_target,
         features_source=features_fda[-1] if features_fda is not None else None,
@@ -9989,8 +9949,7 @@ def train_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loa
 def val_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loader_H, loss_fn, lower_range, nsymb=14, 
                                                             weights=None, linear_interp=False, return_H_gen=False,
                                                             fda_win_h=13, fda_win_w=3, fda_weight=1.0, coral_loss_fn=None,
-                                                            consistency_weight=0.3, residual_consistency_weight=0.2,
-                                                            improvement_consistency_weight=0.1):
+                                                            residual_consistency_weight=0.2):
     """
     Validation step for CNN-only residual learning with FDA Full Translation 1 + CORAL + Domain-Aware Consistency
     
@@ -10010,9 +9969,7 @@ def val_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loade
         fda_win_w: FDA window width (for reference, not used in validation)
         fda_weight: FDA weight (for reference, not used in validation)
         coral_loss_fn: CORAL loss function instance (if None, will create default)
-        consistency_weight: Weight for direct consistency (for monitoring)
         residual_consistency_weight: Weight for residual pattern consistency (for monitoring)
-        improvement_consistency_weight: Weight for improvement ratio consistency (for monitoring)
     """
     loader_H_input_val_source, loader_H_true_val_source, loader_H_input_val_target, loader_H_true_val_target = loader_H
     loss_fn_est = loss_fn[0]  # Only need estimation loss
@@ -10037,9 +9994,7 @@ def val_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loade
     epoc_residual_norm = 0.0
     
     # Domain-aware consistency tracking
-    epoc_improvement_consistency = 0.0
-    epoc_residual_consistency = 0.0
-    epoc_direct_consistency = 0.0
+    epoc_residual_consistency = 0.0 
     
     H_sample = []
     
@@ -10118,56 +10073,19 @@ def val_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loade
             coral_loss = coral_loss_fn(features_src, features_tgt)
             epoc_coral_loss += coral_loss.numpy() * x_src.shape[0]
         
-        # === DOMAIN-AWARE CONSISTENCY METRICS (FOR MONITORING) ===
-        
-        # 1. IMPROVEMENT RATIO CONSISTENCY
-        if improvement_consistency_weight > 0:
-            # Source domain improvement ratio
-            src_input_error = tf.reduce_mean(tf.abs(x_scaled_src - y_scaled_src), axis=[1,2,3])
-            src_corrected_error = tf.reduce_mean(tf.abs(preds_src - y_scaled_src), axis=[1,2,3])
-            src_improvement = (src_input_error - src_corrected_error) / (src_input_error + 1e-8)
-            
-            # Target domain improvement ratio
-            tgt_input_error = tf.reduce_mean(tf.abs(x_scaled_tgt - y_scaled_tgt), axis=[1,2,3])
-            tgt_corrected_error = tf.reduce_mean(tf.abs(preds_tgt - y_scaled_tgt), axis=[1,2,3])
-            tgt_improvement = (tgt_input_error - tgt_corrected_error) / (tgt_input_error + 1e-8)
-            
-            # Consistency metric: How similar are improvement ratios?
-            improvement_consistency = tf.reduce_mean(tf.square(src_improvement - tgt_improvement))
-            epoc_improvement_consistency += improvement_consistency.numpy() * x_src.shape[0]
-        
-        # 2. RESIDUAL PATTERN CONSISTENCY
+        # === DOMAIN-AWARE CONSISTENCY: RESIDUAL PATTERN CONSISTENCY ===
         if residual_consistency_weight > 0:
-            # Normalize residuals by input magnitude
-            src_input_magnitude = tf.abs(x_scaled_src) + 1e-8
+            # Normalize residuals by input magnitude to account for domain differences
+            fda_input_magnitude = tf.abs(x_scaled_src) + 1e-8  # Use source as "FDA" reference
             tgt_input_magnitude = tf.abs(x_scaled_tgt) + 1e-8
             
-            src_residual_normalized = residual_src / src_input_magnitude
-            tgt_residual_normalized = residual_tgt / tgt_input_magnitude
+            # Normalized residual patterns
+            fda_residual_normalized = residual_src / fda_input_magnitude  # Source residual patterns
+            tgt_residual_normalized = residual_tgt / tgt_input_magnitude  # Target residual patterns
             
-            # Consistency metric: How similar are relative correction patterns?
-            residual_pattern_consistency = tf.reduce_mean(tf.square(src_residual_normalized - tgt_residual_normalized))
+            # Consistency: similar relative correction patterns
+            residual_pattern_consistency = tf.reduce_mean(tf.square(fda_residual_normalized - tgt_residual_normalized))
             epoc_residual_consistency += residual_pattern_consistency.numpy() * x_src.shape[0]
-        
-        # 3. DIRECT OUTPUT CONSISTENCY (OPTIONAL)
-        if consistency_weight > 0:
-            # Direct output consistency (less suitable but included for completeness)
-            batch_size_tensor = tf.shape(x_scaled_src)[0]
-            min_batch_size = tf.minimum(batch_size_tensor, tf.shape(x_scaled_tgt)[0])
-            
-            # Take subset for consistency calculation
-            src_subset = preds_src[:min_batch_size]
-            tgt_subset = preds_tgt[:min_batch_size]
-            
-            # Normalize by respective input magnitudes for fair comparison
-            src_input_ref = tf.abs(x_scaled_src[:min_batch_size]) + 1e-8
-            tgt_input_ref = tf.abs(x_scaled_tgt[:min_batch_size]) + 1e-8
-            
-            src_normalized = src_subset / src_input_ref
-            tgt_normalized = tgt_subset / tgt_input_ref
-            
-            direct_consistency = tf.reduce_mean(tf.square(src_normalized - tgt_normalized))
-            epoc_direct_consistency += direct_consistency.numpy() * x_src.shape[0]
         
         # === SMOOTHNESS LOSS COMPUTATION ===
         if temporal_weight != 0 or frequency_weight != 0:
@@ -10242,19 +10160,15 @@ def val_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loade
     avg_nmse = (avg_nmse_source + avg_nmse_target) / 2
     avg_coral_loss = epoc_coral_loss / N_val_source if epoc_coral_loss > 0 else 0.0
     avg_smoothness_loss = epoc_smoothness_loss / N_val_source if epoc_smoothness_loss > 0 else 0.0
-    avg_residual_norm = epoc_residual_norm / (N_val_source + N_val_target)  # ← Average of both domains
+    avg_residual_norm = epoc_residual_norm / (N_val_source + N_val_target)  # Average of both domains
     
-    # Domain-aware consistency averages
-    avg_improvement_consistency = epoc_improvement_consistency / N_val_source if epoc_improvement_consistency > 0 else 0.0
+    # Domain-aware consistency averages (MATCHING TRAINING FUNCTION)
     avg_residual_consistency = epoc_residual_consistency / N_val_source if epoc_residual_consistency > 0 else 0.0
-    avg_direct_consistency = epoc_direct_consistency / N_val_source if epoc_direct_consistency > 0 else 0.0
     
-    # Print enhanced validation statistics
+    # Print enhanced validation statistics (MATCHING TRAINING OUTPUT)
     print(f"    Validation residual norm (avg): {avg_residual_norm:.6f}")
     print(f"    Validation CORAL loss: {avg_coral_loss:.6f}")
-    print(f"    Validation improvement consistency: {avg_improvement_consistency:.6f}")
     print(f"    Validation residual pattern consistency: {avg_residual_consistency:.6f}")
-    print(f"    Validation direct consistency: {avg_direct_consistency:.6f}")
     print(f"    FDA window: {fda_win_h}x{fda_win_w}, weight: {fda_weight}")
     
     # Domain accuracy placeholders (compatible with existing code)
@@ -10262,22 +10176,20 @@ def val_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loade
     avg_domain_acc_target = 0.5
     avg_domain_acc = 0.5
 
-    # Total loss (no discriminator component)
+    # Total loss (MATCHING TRAINING FUNCTION STRUCTURE)
     avg_total_loss = (est_weight * avg_loss_est + 
                     domain_weight * avg_coral_loss + 
-                    improvement_consistency_weight * avg_improvement_consistency +
-                    residual_consistency_weight * avg_residual_consistency +
-                    consistency_weight * avg_direct_consistency +
+                    residual_consistency_weight * avg_residual_consistency +   
                     avg_smoothness_loss)
 
-    # Return compatible structure with enhanced domain-aware metrics
+    # Return compatible structure (MATCHING TRAINING FUNCTION OUTPUT)
     epoc_eval_return = {
         'avg_total_loss': avg_total_loss,
         'avg_loss_est_source': avg_loss_est_source,
         'avg_loss_est_target': avg_loss_est_target, 
         'avg_loss_est': avg_loss_est,
         'avg_gan_disc_loss': 0.0,  # No discriminator
-        'avg_domain_loss': avg_coral_loss + avg_improvement_consistency + avg_residual_consistency,  # Combined domain-aware loss
+        'avg_domain_loss': avg_coral_loss + avg_residual_consistency, 
         'avg_nmse_source': avg_nmse_source,
         'avg_nmse_target': avg_nmse_target,
         'avg_nmse': avg_nmse,
@@ -10285,17 +10197,14 @@ def val_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loade
         'avg_domain_acc_target': avg_domain_acc_target,
         'avg_domain_acc': avg_domain_acc,
         'avg_smoothness_loss': avg_smoothness_loss,
-        # Additional domain-aware consistency metrics for detailed monitoring
-        'avg_improvement_consistency': avg_improvement_consistency,
+        # Additional metrics for detailed monitoring
         'avg_residual_consistency': avg_residual_consistency,
-        'avg_direct_consistency': avg_direct_consistency,
-        'avg_coral_loss': avg_coral_loss  # ← Explicit CORAL loss for tracking
+        'avg_coral_loss': avg_coral_loss  # Explicit CORAL loss for tracking
     }
 
     if return_H_gen:
         return H_sample, epoc_eval_return, H_gen
     return H_sample, epoc_eval_return
-
 
 ### Input Domain translation 
 class CycleGANGenerator(tf.keras.Model):
