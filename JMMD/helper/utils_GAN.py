@@ -9663,6 +9663,7 @@ def train_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loa
     epoc_loss_coral = 0.0
     epoc_loss_improvement_consistency = 0.0   
     epoc_loss_residual_consistency = 0.0
+    epoc_loss_direct_consistency = 0.0
     epoc_residual_norm = 0.0
     epoc_fda_effect_input = 0.0
     epoc_fda_effect_label = 0.0
@@ -9855,9 +9856,9 @@ def train_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loa
                 fda_normalized = fda_subset / fda_input_ref
                 tgt_normalized = tgt_subset / tgt_input_ref
                 
-                direct_consistency = tf.reduce_mean(tf.square(fda_normalized - tgt_normalized))  
+                direct_consistency_loss = tf.reduce_mean(tf.square(fda_normalized - tgt_normalized))  
             else:
-                direct_consistency = 0.0  
+                direct_consistency_loss = 0.0  # ← FIXED: Consistent variable name
             
             # Residual regularization: Encourage small, meaningful corrections
             if flag_residual_reg:
@@ -9867,16 +9868,30 @@ def train_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loa
                 
             # === SMOOTHNESS LOSS ===
             if temporal_weight != 0 or frequency_weight != 0:
-                if fda_weight < 1.0 and 'fda_samples' in locals() and fda_samples > 0 and (batch_size_int - fda_samples) > 0:
-                    smoothness_fda = compute_total_smoothness_loss(x_corrected_combined[:fda_samples], 
-                                                                temporal_weight=temporal_weight, 
-                                                                frequency_weight=frequency_weight)
-                    smoothness_src = compute_total_smoothness_loss(x_corrected_combined[fda_samples:], 
-                                                                temporal_weight=temporal_weight, 
-                                                                frequency_weight=frequency_weight)
-                    smoothness_loss = (smoothness_fda + smoothness_src) / 2
+                # Check if we have hybrid training variables
+                if fda_weight < 1.0:
+                    # Try to access fda_samples safely
+                    try:
+                        if 'fda_samples' in locals() and fda_samples > 0 and (batch_size_int - fda_samples) > 0:
+                            smoothness_fda = compute_total_smoothness_loss(x_corrected_combined[:fda_samples], 
+                                                                        temporal_weight=temporal_weight, 
+                                                                        frequency_weight=frequency_weight)
+                            smoothness_src = compute_total_smoothness_loss(x_corrected_combined[fda_samples:], 
+                                                                        temporal_weight=temporal_weight, 
+                                                                        frequency_weight=frequency_weight)
+                            smoothness_loss = (smoothness_fda + smoothness_src) / 2
+                        else:
+                            # Fallback to full batch
+                            smoothness_loss = compute_total_smoothness_loss(x_corrected_combined, 
+                                                                        temporal_weight=temporal_weight, 
+                                                                        frequency_weight=frequency_weight)
+                    except:
+                        # Safe fallback
+                        smoothness_loss = compute_total_smoothness_loss(x_corrected_combined if fda_weight < 1.0 else x_corrected_fda, 
+                                                                    temporal_weight=temporal_weight, 
+                                                                    frequency_weight=frequency_weight)
                 else:
-                    smoothness_loss = compute_total_smoothness_loss(x_corrected_fda if fda_weight >= 1.0 else x_corrected_combined, 
+                    smoothness_loss = compute_total_smoothness_loss(x_corrected_fda, 
                                                                 temporal_weight=temporal_weight, 
                                                                 frequency_weight=frequency_weight)
             else:
@@ -9887,7 +9902,7 @@ def train_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loa
                         domain_weight * coral_loss +
                         improvement_consistency_weight * improvement_consistency_loss +  # Improvement ratio consistency
                         residual_consistency_weight * residual_pattern_consistency +    # Residual pattern consistency  
-                        consistency_weight * direct_consistency +    
+                        consistency_weight * direct_consistency_loss +                  # ← FIXED: Correct variable name
                         residual_reg +                   
                         smoothness_loss)
             
@@ -9929,9 +9944,9 @@ def train_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loa
         epoc_loss_total += total_loss.numpy() * x_src.shape[0]
         epoc_loss_est += est_loss.numpy() * x_src.shape[0]
         epoc_loss_coral += coral_loss.numpy() * x_src.shape[0] if domain_weight > 0 else 0.0
-        epoc_loss_improvement_consistency += improvement_consistency_loss.numpy() * x_src.shape[0]  # ✅ FIXED: Renamed
-        epoc_loss_residual_consistency += residual_pattern_consistency.numpy() * x_src.shape[0]
-        epoc_loss_direct_consistency += direct_consistency.numpy() * x_src.shape[0]  # ✅ FIXED: Use correct variable
+        epoc_loss_improvement_consistency += improvement_consistency_loss.numpy() * x_src.shape[0]  
+        epoc_loss_residual_consistency += residual_pattern_consistency.numpy() * x_src.shape[0]      
+        epoc_loss_direct_consistency += direct_consistency_loss.numpy() * x_src.shape[0]  
         epoc_residual_norm += tf.reduce_mean(tf.abs(residual_combined)).numpy() * x_src.shape[0]
     
     # Close feature files
@@ -9944,9 +9959,9 @@ def train_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loa
     avg_loss_est = epoc_loss_est / N_train
     avg_loss_est_target = epoc_loss_est_target / N_train
     avg_loss_coral = epoc_loss_coral / N_train
-    avg_loss_improvement_consistency = epoc_loss_improvement_consistency / N_train  # ✅ FIXED: Renamed
+    avg_loss_improvement_consistency = epoc_loss_improvement_consistency / N_train  
     avg_loss_residual_consistency = epoc_loss_residual_consistency / N_train
-    avg_loss_direct_consistency = epoc_loss_direct_consistency / N_train  # ✅ FIXED: Renamed
+    avg_loss_direct_consistency = epoc_loss_direct_consistency / N_train
     avg_residual_norm = epoc_residual_norm / N_train
     avg_fda_effect_input = epoc_fda_effect_input / N_train
     avg_fda_effect_label = epoc_fda_effect_label / N_train
@@ -9956,20 +9971,20 @@ def train_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loa
     print(f"    FDA input translation effect (Source→Target INPUT): {avg_fda_effect_input:.6f}")
     print(f"    FDA label translation effect (Source Labels→Target INPUT style): {avg_fda_effect_label:.6f}")
     print(f"    CORAL feature alignment loss: {avg_loss_coral:.6f}")
-    print(f"    Improvement ratio consistency: {avg_loss_improvement_consistency:.6f}")  # ✅ FIXED: Correct name
+    print(f"    Improvement ratio consistency: {avg_loss_improvement_consistency:.6f}")  
     print(f"    Residual pattern consistency: {avg_loss_residual_consistency:.6f}")
-    print(f"    Direct consistency: {avg_loss_direct_consistency:.6f}")  # ✅ FIXED: Correct name
+    print(f"    Direct consistency: {avg_loss_direct_consistency:.6f}")  
     print(f"    FDA window: {fda_win_h}x{fda_win_w}, weight: {fda_weight}")
     
     # Return compatible structure
     return train_step_Output(
         avg_epoc_loss_est=avg_loss_est,
-        avg_epoc_loss_domain=avg_loss_coral + avg_loss_improvement_consistency + avg_loss_residual_consistency,  # ✅ FIXED: Correct variable names
+        avg_epoc_loss_domain=avg_loss_coral + avg_loss_improvement_consistency + avg_loss_residual_consistency,  # ← FIXED: Consistent variable names
         avg_epoc_loss=avg_loss_total,
         avg_epoc_loss_est_target=avg_loss_est_target,
         features_source=features_fda[-1] if features_fda is not None else None,
         film_features_source=features_fda[-1] if features_fda is not None else None,
-        avg_epoc_loss_d=0.0  # No discriminator
+        avg_epoc_loss_d=0.0  
     )
 def val_step_cnn_residual_FDAfullTranslation1_coral_domainAware(model_cnn, loader_H, loss_fn, lower_range, nsymb=14, 
                                                             weights=None, linear_interp=False, return_H_gen=False,
