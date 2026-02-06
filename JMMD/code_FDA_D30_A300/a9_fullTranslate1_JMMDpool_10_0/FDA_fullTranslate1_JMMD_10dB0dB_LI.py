@@ -267,7 +267,7 @@ for sub_folder in sub_folder_:
     # 
     
     flag = 1 # flag to plot and save H_true
-    epoc_pad = []    # epochs that calculating pad (return_features == True)
+    epoc_pad = []    # epochs that cal culating pad (return_features == True)
     for epoch in range(n_epochs):
         # get weights 
         weights = scheduler.get_weights_domain_first_smooth(epoch, n_epochs)
