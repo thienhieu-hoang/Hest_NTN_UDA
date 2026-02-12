@@ -682,6 +682,67 @@ def calc_pad_svm(X, y):
 
     return pad
 
+def calc_pad_pca_svm(X, y, final_pca_components=None, scale=True):
+    """
+    Calculate Proxy A-distance (PAD) using SVM.
+    Input: 
+        X - features (after first PCA, e.g., 2000D)
+        y - domain labels (0=source, 1=target)
+        final_pca_components - Optional second PCA reduction (e.g., 100D)
+    """
+    # Split into train/test
+    X1, X2, y1, y2 = train_test_split(X, y, test_size=0.5, random_state=42, shuffle=True)
+        # X1 for training, X2 for testing
+    
+    # Standardize features
+    if scale:
+        scaler = StandardScaler()
+        X1_scaled = scaler.fit_transform(X1)
+        X2_scaled = scaler.transform(X2)
+    else:
+        X1_scaled = X1
+        X2_scaled = X2
+
+    # === NEW: OPTIONAL SECOND PCA (2000 → 100) ===
+    if final_pca_components is not None and final_pca_components < X1_scaled.shape[1]:
+        print(f"Applying second PCA: {X1_scaled.shape[1]} → {final_pca_components} dimensions")
+        
+        # Use regular PCA (NOT IncrementalPCA) - data fits in memory!
+        pca_final = PCA(n_components=final_pca_components, random_state=42)
+        
+        X1_scaled = pca_final.fit_transform(X1_scaled)
+        X2_scaled = pca_final.transform(X2_scaled)
+        
+        explained_variance = np.sum(pca_final.explained_variance_ratio_)
+        print(f"  Explained variance: {explained_variance:.4f}")
+        print(f"  Final feature shape: {X1_scaled.shape}")
+
+    # Try multiple C values
+    C_values = [0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0]
+    best_epsilon = 1.0
+    best_C = None
+
+    for C in C_values:
+        svm = SVC(C=C, probability=True)
+        svm.fit(X1_scaled, y1)
+        accuracy = svm.score(X2_scaled, y2)
+        error_rate = 1 - accuracy
+        print(f"== C: {C}, Error rate: {error_rate:.4f}")
+        if error_rate < best_epsilon:
+            best_epsilon = error_rate
+            best_C = C
+
+    print(f"Best C: {best_C}, Best error rate: {best_epsilon:.4f}")
+    if best_epsilon > 0.5: 
+        print(f"Flip the predictions")
+        best_epsilon = 1 - best_epsilon
+
+    # Compute PAD
+    pad = 2 * (1 - 2 * best_epsilon)
+    print(f"============ PAD (SVM) = {pad:.4f}")
+
+    return pad
+
 def calc_pad_lda(X, y):
     """
     Calculate Proxy A-distance (PAD) using Linear Discriminant Analysis (LDA).

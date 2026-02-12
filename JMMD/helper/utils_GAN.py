@@ -6109,9 +6109,10 @@ def apply_phase_to_amplitude(mixed_amplitude, phase_spectrum):
 
 def train_step_cnn_residual_fda(model_cnn, loader_H, loss_fn, optimizer, lower_range=-1, 
                                 save_features=False, nsymb=14, weights=None, linear_interp=False,
-                                fda_win_h=13, fda_win_w=3, fda_weight=1.0):
+                                fda_win_h=13, fda_win_w=3, fda_weight=1.0, pca_components=2000):
     """
-    CNN-only residual training step with FDA input preprocessing
+    CNN residual training step with FDA input preprocessing
+    Use IncrementalPCA to save extracted 
     """
     loader_H_input_train_src, loader_H_true_train_src, \
         loader_H_input_train_tgt, loader_H_true_train_tgt = loader_H
@@ -6132,6 +6133,18 @@ def train_step_cnn_residual_fda(model_cnn, loader_H, loss_fn, optimizer, lower_r
     features_tgt = None
     
     if save_features:
+        # ============ INCREMENTAL PCA SETUP (same as train_step_wgan_gp_jmmd_new) ============
+        # Initialize incremental PCA variables
+        pca_src = IncrementalPCA(n_components=pca_components, batch_size=64)
+        pca_tgt = IncrementalPCA(n_components=pca_components, batch_size=64)
+        pca_fitted = False
+        fitting_batch_count = 0
+        max_fitting_batches = 3  # Use first 3 batches to fit PCA
+        
+        # Storage for fitting batches (temporary)
+        fitting_batches_src = []
+        fitting_batches_tgt = []
+        
         features_h5_path_source = 'features_source.h5'
         if os.path.exists(features_h5_path_source):
             os.remove(features_h5_path_source)
@@ -6188,6 +6201,8 @@ def train_step_cnn_residual_fda(model_cnn, loader_H, loss_fn, optimizer, lower_r
         
         # 
         x_fda_mixed = tf.stack([tf.math.real(x_fda_mixed_complex), tf.math.imag(x_fda_mixed_complex)], axis=-1)
+        fda_difference = tf.reduce_mean(tf.abs(x_fda_mixed - x_scaled_src))
+        epoc_fda_effect += fda_difference.numpy() * x_src.shape[0]
         
         # === Train CNN with RESIDUAL learning ===
         with tf.GradientTape() as tape:
@@ -6269,34 +6284,91 @@ def train_step_cnn_residual_fda(model_cnn, loader_H, loss_fn, optimizer, lower_r
         est_loss_tgt = loss_fn_est(y_scaled_tgt, x_corrected_tgt)
         epoc_loss_est_target += est_loss_tgt.numpy() * x_tgt.shape[0]
         
-        # === Save features if required ===
+        # ============ INCREMENTAL PCA FEATURE COMPRESSION ============
         if save_features and features_src is not None:
-            # Save features
+            # Extract and flatten features
             features_np_source = features_src[-1].numpy()
-            if features_dataset_source is None:
-                features_dataset_source = features_h5_source.create_dataset(
-                    'features',
-                    data=features_np_source,
-                    maxshape=(None,) + features_np_source.shape[1:],
-                    chunks=True
-                )
-            else:
-                features_dataset_source.resize(features_dataset_source.shape[0] + features_np_source.shape[0], axis=0)
-                features_dataset_source[-features_np_source.shape[0]:] = features_np_source
+            if len(features_np_source.shape) > 2:
+                features_np_source = features_np_source.reshape(features_np_source.shape[0], -1)
+            
+            features_np_target = features_tgt[-1].numpy()
+            if len(features_np_target.shape) > 2:
+                features_np_target = features_np_target.reshape(features_np_target.shape[0], -1)
+            
+            print(f'Batch {batch_idx+1}: Original feature shape - Source: {features_np_source.shape}, Target: {features_np_target.shape}')
+            
+            if not pca_fitted and fitting_batch_count < max_fitting_batches:
+                # Phase 1: Collect batches for PCA fitting
+                fitting_batches_src.append(features_np_source)
+                fitting_batches_tgt.append(features_np_target)
+                fitting_batch_count += 1
+                print(f"Collecting batch {fitting_batch_count}/{max_fitting_batches} for PCA fitting...")
                 
-            if features_tgt is not None:
-                features_np_target = features_tgt[-1].numpy()
-                if features_dataset_target is None:
-                    features_dataset_target = features_h5_target.create_dataset(
-                        'features',
-                        data=features_np_target,
-                        maxshape=(None,) + features_np_target.shape[1:],
-                        chunks=True
-                    )
-                else:
-                    features_dataset_target.resize(features_dataset_target.shape[0] + features_np_target.shape[0], axis=0)
-                    features_dataset_target[-features_np_target.shape[0]:] = features_np_target
-        
+                if fitting_batch_count == max_fitting_batches:
+                    # Fit incremental PCA on collected batches
+                    print("Fitting Incremental PCA on collected batches...")
+                    fitting_data_src = np.vstack(fitting_batches_src)
+                    fitting_data_tgt = np.vstack(fitting_batches_tgt)
+                    pca_src.partial_fit(fitting_data_src)
+                    pca_tgt.partial_fit(fitting_data_tgt)
+                    
+                    # Transform and save the fitting batches
+                    print("Transforming and saving fitting batches...")
+                    for batch in fitting_batches_src:
+                        batch_pca = pca_src.transform(batch)
+                        
+                        if features_dataset_source is None:
+                            features_dataset_source = features_h5_source.create_dataset(
+                                'features', data=batch_pca,
+                                maxshape=(None,) + batch_pca.shape[1:], chunks=True
+                            )
+                        else:
+                            features_dataset_source.resize(features_dataset_source.shape[0] + batch_pca.shape[0], axis=0)
+                            features_dataset_source[-batch_pca.shape[0]:] = batch_pca
+                    
+                    for batch in fitting_batches_tgt:
+                        batch_pca = pca_tgt.transform(batch)
+                        
+                        if features_dataset_target is None:
+                            features_dataset_target = features_h5_target.create_dataset(
+                                'features', data=batch_pca,
+                                maxshape=(None,) + batch_pca.shape[1:], chunks=True
+                            )
+                        else:
+                            features_dataset_target.resize(features_dataset_target.shape[0] + batch_pca.shape[0], axis=0)
+                            features_dataset_target[-batch_pca.shape[0]:] = batch_pca
+                    
+                    # Clear fitting data and mark as fitted
+                    del fitting_batches_src, fitting_batches_tgt
+                    pca_fitted = True
+                    
+                    explained_var_src = np.sum(pca_src.explained_variance_ratio_)
+                    explained_var_tgt = np.sum(pca_tgt.explained_variance_ratio_)
+                    print("Phase 1 PCA fitting completed.")
+                    print(f"PCA fitted! Explained variance - Source: {explained_var_src:.4f}, Target: {explained_var_tgt:.4f}")
+                    print(f"Compression: {features_np_source.shape[1]} -> {pca_components} dimensions")
+            
+            elif pca_fitted:
+                print("Phase 2: Transform current batch with fitted PCA")
+                # Phase 2: Transform current batch and save immediately
+                features_src_pca = pca_src.transform(features_np_source)
+                features_tgt_pca = pca_tgt.transform(features_np_target)
+                
+                # Update PCA incrementally with current batch
+                pca_src.partial_fit(features_np_source)
+                pca_tgt.partial_fit(features_np_target)
+                
+                # Save compressed features
+                features_dataset_source.resize(features_dataset_source.shape[0] + features_src_pca.shape[0], axis=0)
+                features_dataset_source[-features_src_pca.shape[0]:] = features_src_pca
+                
+                features_dataset_target.resize(features_dataset_target.shape[0] + features_tgt_pca.shape[0], axis=0)
+                features_dataset_target[-features_tgt_pca.shape[0]:] = features_tgt_pca
+                
+                print(f"Batch {batch_idx+1}: Transformed and saved - "
+                    f"Source: {features_np_source.shape} -> {features_src_pca.shape}, "
+                    f"Target: {features_np_target.shape} -> {features_tgt_pca.shape}")
+    
         # Single optimizer update
         grads = tape.gradient(total_loss, model_cnn.trainable_variables)
         optimizer.apply_gradients(zip(grads, model_cnn.trainable_variables))
@@ -6316,6 +6388,7 @@ def train_step_cnn_residual_fda(model_cnn, loader_H, loss_fn, optimizer, lower_r
     avg_loss_est = epoc_loss_est / N_train
     avg_loss_est_target = epoc_loss_est_target / N_train
     avg_residual_norm = epoc_residual_norm / N_train
+    avg_fda_effect = epoc_fda_effect / N_train
     
     # Print FDA-specific statistics
     print(f"    FDA residual norm (avg): {avg_residual_norm:.6f}")
