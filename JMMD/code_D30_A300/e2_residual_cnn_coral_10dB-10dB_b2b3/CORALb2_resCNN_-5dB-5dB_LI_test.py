@@ -27,7 +27,7 @@ from JMMD.helper.utils_GAN import WeightScheduler
 
 SNR = -5
 # source_data_file_path_label = os.path.abspath(os.path.join(code_dir, '..', 'generatedChan', 'OpenNTN','H_perfect.mat'))
-source_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_D_30_sim', f'SNR_{SNR}dB', 'matlabNTN.mat'))
+source_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_D_30_sim', f'SNR_-5dB', 'matlabNTN.mat'))
 target_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_A_300_sim', f'SNR_{SNR}dB', 'matlabNTN.mat'))
 norm_approach = 'minmax' # can be set to 'std'
 lower_range = -1 
@@ -47,16 +47,12 @@ lower_range = -1
 # }
 # print('adv_weight = ', weights['adv_weight'], ', est_weight = ', weights['est_weight'], ', domain_weight = ', weights['domain_weight'])
 
-print("CORAL, reconstruction training first then domain adaptation training, domain weight 0.01 → 1.5, est weight 1.5 → 0.8, warmup epochs 80")
 scheduler = WeightScheduler(strategy='reconstruction_first', start_domain_weight=0.01, end_domain_weight=1.5,
                             start_est_weight=1.5, end_est_weight=0.8, warmup_epochs=80) 
                             # adv_weight = 0.005 default
                             # warmup_epochs=150 default
                             # schedule_type = 'linear' default
 
-fda_win_h=13 
-fda_win_w=3 
-fda_weight=0.8 # 1.0
 
 if norm_approach == 'minmax':
     if lower_range == 0:
@@ -155,7 +151,7 @@ loss_fn_ce = tf.keras.losses.MeanSquaredError()  # Channel estimation loss (gene
 loss_fn_bce = tf.keras.losses.BinaryCrossentropy(from_logits=False) # Binary cross-entropy loss for discriminator
 
 from JMMD.helper.utils_GAN import CNNGenerator
-from JMMD.helper.utils_GAN import post_val, train_step_cnn_residual_FDAfullTranslation1_coral, val_step_cnn_residual_coral
+from JMMD.helper.utils_GAN import post_val, train_step_cnn_residual_coral, val_step_cnn_residual_coral
 
 import time
 start = time.perf_counter()
@@ -166,8 +162,6 @@ start = time.perf_counter()
 n_epochs= 5
 epoch_min = 0
 epoch_step = 1
-
-stage_name="CORAL extracted features"
 
 pca_components = 24
 pca_batch_size = 64
@@ -265,10 +259,12 @@ for sub_folder in sub_folder_:
 
     # 
     model = CNNGenerator(n_blocks=4)
-    print("4 blocks, CORAL, extrac layers = blocks 2, 3")
+    print("4 blocks, CORAL, no FDA, extract layers = blocks 2, 3")
     # 
     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4, beta_1=0.5, beta_2=0.9)
     # 
+    from JMMD.helper.utils_GAN import GlobalPoolingCORALLoss
+    coral_loss_fn = GlobalPoolingCORALLoss()
     
     flag = 1 # flag to plot and save H_true
     epoc_pad = []    # epochs that calculating pad (return_features == True)
@@ -288,11 +284,11 @@ for sub_folder in sub_folder_:
         # loader_H = [loader_H_practical_train_source, loader_H_true_train_source, loader_H_practical_train_target, loader_H_true_train_target]
         loader_H = [loader_H_input_train_source, loader_H_true_train_source, loader_H_input_train_target, loader_H_true_train_target]
 
-        # Only 2 loss functions
+        # Only 2 loss functions needed for JMMD
         loss_fn = [loss_fn_ce, loss_fn_bce]
     
         ##########################
-        if epoch == n_epochs-1:
+        if epoch==0 or epoch == n_epochs-1:
             # return_features == return features to calculate PAD
             return_features = True
             epoc_pad.append(epoch)
@@ -301,9 +297,8 @@ for sub_folder in sub_folder_:
 
         ##########################
         # 
-        train_step_output = train_step_cnn_residual_FDAfullTranslation1_coral(model, loader_H, loss_fn, optimizer, lower_range=-1, 
-                        save_features=return_features, weights=weights, linear_interp=linear_interp,
-                        fda_win_h=fda_win_h, fda_win_w=fda_win_w, fda_weight=fda_weight,
+        train_step_output = train_step_cnn_residual_coral(model, loader_H, loss_fn, optimizer, lower_range=-1, 
+                        coral_loss_fn=coral_loss_fn, save_features=return_features, weights=weights, linear_interp=linear_interp,
                         pca_components=pca_components, pca_batch_size=pca_batch_size, pca_refit_batches=pca_refit_batches)
 
         train_epoc_loss_est        = train_step_output.avg_epoc_loss_est
@@ -318,11 +313,11 @@ for sub_folder in sub_folder_:
                 # All are already calculated in average over training dataset (source/target - respectively)
         print("Time", time.perf_counter() - start, "seconds")
         # Calculate PAD for the extracted features
-        if return_features and (weights['domain_weight']!=0) and (epoch == n_epochs-1):
+        if return_features and (weights['domain_weight']!=0) and (epoch==0 or epoch == n_epochs-1):
             features_source_file = "features_source.h5"
             features_target_file = "features_target.h5"
             print(f"epoch {epoch+1}/{n_epochs}")
-            ## Calculate PCA_PAD for extracted features with PCA_SVM, PCA_LDA, PCA_LogReg
+            # ## Calculate PCA_PAD for extracted features with PCA_SVM, PCA_LDA, PCA_LogReg
             # X_features, y_features = PAD.extract_features_with_pca(features_source_file, features_target_file, pca_components=100)
             # pad_svm_epoc = PAD.calc_pad_svm(X_features, y_features)
             # pad_lda_epoc = PAD.calc_pad_lda(X_features, y_features)
@@ -330,7 +325,8 @@ for sub_folder in sub_folder_:
             # pad_metrics['pad_pca_svm'][f'epoch_{epoch+1}'] = pad_svm_epoc
             # pad_metrics['pad_pca_lda'][f'epoch_{epoch+1}'] = pad_lda_epoc
             # pad_metrics['pad_pca_logreg'][f'epoch_{epoch+1}'] = pad_logreg_epoc
-            pad_svm_epoc, _, _ = PAD.load_and_calculate_pad(features_source_file, features_target_file, stage_name=stage_name)
+            pad_svm_epoc, _, _ = PAD.load_and_calculate_pad(features_source_file, features_target_file)
+            
             
         #     ## Distribution of extracted features
         #     plotfig.plotHist(features_source_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'source_epoch_{epoch+1}', percent=99)
@@ -345,11 +341,11 @@ for sub_folder in sub_folder_:
         #     # w_dist.append(w_dist_epoc)
             
 
-        #     if os.path.exists(features_source_file):
-        #         os.remove(features_source_file)
-        #     if os.path.exists(features_target_file):
-        #         os.remove(features_target_file)
-        #     print("Time", time.perf_counter() - start, "seconds")
+            if os.path.exists(features_source_file):
+                os.remove(features_source_file)
+            if os.path.exists(features_target_file):
+                os.remove(features_target_file)
+            print("Time", time.perf_counter() - start, "seconds")
             
         
         # Average loss for the epoch
@@ -383,17 +379,16 @@ for sub_folder in sub_folder_:
         if (epoch==epoch_min) or (epoch+1>epoch_min and (epoch-epoch_min)%epoch_step==0) and epoch!=n_epochs-1:
             # 
             H_sample, epoc_val_return = val_step_cnn_residual_coral(model, loader_H_eval, loss_fn, lower_range, 
-                                            weights=weights, linear_interp=linear_interp)
-            
+                                            coral_loss_fn=coral_loss_fn, weights=weights, linear_interp=linear_interp)
             visualize_H(H_sample, H_to_save, epoch, plotfig.figChan, flag, model_path, sub_folder, domain_weight=weights['domain_weight'])
             flag = 0  # after the first epoch, no need to save H_true anymore
         elif epoch==n_epochs-1:
             _, epoc_val_return, H_val_gen = val_step_cnn_residual_coral(model, loader_H_eval, loss_fn, lower_range, 
-                                            weights=weights, linear_interp=linear_interp, return_H_gen=True)
+                                            coral_loss_fn=coral_loss_fn, weights=weights, linear_interp=linear_interp, return_H_gen=True)    
         else:
             # 
             _, epoc_val_return = val_step_cnn_residual_coral(model, loader_H_eval, loss_fn, lower_range, 
-                                        weights=weights, linear_interp=linear_interp)
+                                        coral_loss_fn=coral_loss_fn, weights=weights, linear_interp=linear_interp)
         
         post_val(epoc_val_return, epoch, n_epochs, val_metrics, domain_weight=weights['domain_weight'])
         

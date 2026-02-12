@@ -112,17 +112,17 @@ indices_target = np.resize(indices_target, N_samp)
 
 # =======================================================
 ## Divide the indices into training and validation sets
-indices_train_source = indices_source[:train_size]
-indices_val_source   = indices_source[train_size:train_size + val_size]
+# indices_train_source = indices_source[:train_size]
+# indices_val_source   = indices_source[train_size:train_size + val_size]
 
-indices_train_target = indices_target[:train_size]
-indices_val_target   = indices_target[train_size:train_size + val_size]
+# indices_train_target = indices_target[:train_size]
+# indices_val_target   = indices_target[train_size:train_size + val_size]
 
 # to test code
-# indices_train_source = indices_source[:96]
-# indices_val_source = indices_source[2032:]
-# indices_train_target = indices_target[:96]
-# indices_val_target = indices_target[2032:]
+indices_train_source = indices_source[:96]
+indices_val_source = indices_source[2032:]
+indices_train_target = indices_target[:96]
+indices_val_target = indices_target[2032:]
 
 print('train_size = ', indices_train_source.shape[0])
 print('val_size = ', indices_val_source.shape[0])
@@ -159,12 +159,12 @@ from JMMD.helper.utils_GAN import post_val, train_step_cnn_residual_fda_fullTran
 import time
 start = time.perf_counter()
 
-n_epochs= 300 # 300
-epoch_min = 100
-epoch_step = 20
-# n_epochs= 5
-# epoch_min = 0
-# epoch_step = 1
+# n_epochs= 300 # 300
+# epoch_min = 100
+# epoch_step = 20
+n_epochs= 5
+epoch_min = 0
+epoch_step = 1
 
 sub_folder_ = ['GAN_linear']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
 
@@ -284,12 +284,12 @@ for sub_folder in sub_folder_:
         loss_fn = [loss_fn_ce, loss_fn_bce]
     
         ##########################
-        # if epoch==0 or epoch == n_epochs-1:
-        #     # return_features == return features to calculate PAD
-        #     return_features = True
-        #     epoc_pad.append(epoch)
-        # else:
-        #     return_features = False
+        if epoch == n_epochs-1:
+            # return_features == return features to calculate PAD
+            return_features = True
+            epoc_pad.append(epoch)
+        else:
+            return_features = False
 
         ##########################
         # 
@@ -307,20 +307,18 @@ for sub_folder in sub_folder_:
                 # train_epoc_loss_domain = JMMD loss (statistical distribution matching)
                 # train_epoc_loss_est_target - just to monitor - the machine can not calculate because no label available in source domain
                 # All are already calculated in average over training dataset (source/target - respectively)
-        print("Time", time.perf_counter() - start, "seconds")
+        print("Time start to calculate PAD: ", time.perf_counter() - start, "seconds")
         # Calculate PAD for the extracted features
-        # if return_features and (weights['domain_weight']!=0) and (epoch==0 or epoch == n_epochs-1):
-        #     features_source_file = "features_source.h5"
-        #     features_target_file = "features_target.h5"
-        #     print(f"epoch {epoch+1}/{n_epochs}")
-        #     ## Calculate PCA_PAD for extracted features with PCA_SVM, PCA_LDA, PCA_LogReg
-        #     X_features, y_features = PAD.extract_features_with_pca(features_source_file, features_target_file, pca_components=100)
-        #     pad_svm_epoc = PAD.calc_pad_svm(X_features, y_features)
-        #     pad_lda_epoc = PAD.calc_pad_lda(X_features, y_features)
-        #     pad_logreg_epoc = PAD.calc_pad_logreg(X_features, y_features)
-        #     pad_metrics['pad_pca_svm'][f'epoch_{epoch+1}'] = pad_svm_epoc
-        #     pad_metrics['pad_pca_lda'][f'epoch_{epoch+1}'] = pad_lda_epoc
-        #     pad_metrics['pad_pca_logreg'][f'epoch_{epoch+1}'] = pad_logreg_epoc
+        if return_features and (weights['domain_weight']!=0) and (epoch==0 or epoch == n_epochs-1):
+            features_source_file = "features_source.h5"
+            features_target_file = "features_target.h5"
+            print(f"epoch {epoch+1}/{n_epochs}")
+            ## Calculate PCA_PAD for extracted features with PCA_SVM, PCA_LDA, PCA_LogReg
+            # X_features, y_features = PAD.extract_features_with_pca(features_source_file, features_target_file, pca_components=100)
+            # pad_svm_epoc = PAD.calc_pad_svm(X_features, y_features)
+            # pad_metrics['pad_pca_svm'][f'epoch_{epoch+1}'] = pad_svm_epoc            
+            
+            pad_svm_epoc, _, _ = PAD.load_and_calculate_pad(features_source_file, features_target_file)
             
         #     ## Distribution of extracted features
         #     plotfig.plotHist(features_source_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'source_epoch_{epoch+1}', percent=99)
@@ -335,11 +333,11 @@ for sub_folder in sub_folder_:
         #     # w_dist.append(w_dist_epoc)
             
 
-        #     if os.path.exists(features_source_file):
-        #         os.remove(features_source_file)
-        #     if os.path.exists(features_target_file):
-        #         os.remove(features_target_file)
-        #     print("Time", time.perf_counter() - start, "seconds")
+            if os.path.exists(features_source_file):
+                os.remove(features_source_file)
+            if os.path.exists(features_target_file):
+                os.remove(features_target_file)
+            print("Time end to calculate PAD: ", time.perf_counter() - start, "seconds")
             
         
         # Average loss for the epoch
