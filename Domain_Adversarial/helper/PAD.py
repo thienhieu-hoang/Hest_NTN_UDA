@@ -1,4 +1,5 @@
 import numpy as np
+import os
 from sklearn.model_selection import train_test_split
 from sklearn.svm import SVC
 from sklearn.decomposition import PCA
@@ -848,3 +849,234 @@ def complex_to_real_stack(complex_array):
     # Stack along the last dimension: (..., 2) where [..., 0] = real, [..., 1] = imag
     # Ensure the result is float64
     return np.stack([real_part, imag_part], axis=-1).astype(np.float64)
+
+# ==============================================================================
+# ==============================================================================
+def apply_incremental_pca_and_save(data_source, data_target, h5_path_source, h5_path_target,
+                                    batch_size=8, pca_components_first=2000, 
+                                    incremental_batch_size=64, max_fitting_batches=3,
+                                    data_name="data"):
+    """
+    Apply IncrementalPCA to source and target data and save to .h5 files
+    Learn incrementally from ALL batches by stacking max_fitting_batches together
+    
+    Args:
+        data_source: Source data array (N, H, W, C)
+        data_target: Target data array (N, H, W, C)
+        h5_path_source: Path to save source .h5 file
+        h5_path_target: Path to save target .h5 file
+        batch_size: Batch size for processing (8)
+        pca_components_first: Number of PCA components (2000)
+        incremental_batch_size: Batch size for IncrementalPCA (64)
+        max_fitting_batches: Number of batches to stack together for each partial_fit (3)
+        data_name: Name for logging
+    
+    Returns:
+        pca_src, pca_tgt, explained_var_src, explained_var_tgt
+    """
+    
+    print("\n" + "="*80)
+    print(f"APPLYING INCREMENTAL PCA TO {data_name.upper()}")
+    print("="*80)
+    
+    # Convert TensorFlow tensor to NumPy array
+    data_source_np = data_source.numpy() if isinstance(data_source, tf.Tensor) else data_source
+    data_target_np = data_target.numpy() if isinstance(data_target, tf.Tensor) else data_target
+
+    # Flatten data
+    N_samples_src = data_source_np.shape[0]
+    N_samples_tgt = data_target_np.shape[0]
+    original_dim = data_source_np.shape[1] * data_source_np.shape[2] * data_source_np.shape[3]
+    
+    data_source_flat = data_source_np.reshape(N_samples_src, -1)
+    data_target_flat = data_target_np.reshape(N_samples_tgt, -1)
+    
+    print(f"Flattened source shape: {data_source_flat.shape}")
+    print(f"Flattened target shape: {data_target_flat.shape}")
+    print(f"Original dimension: {original_dim} → Target dimension: {pca_components_first}")
+    
+    # Initialize PCA
+    pca_src = IncrementalPCA(n_components=pca_components_first, batch_size=incremental_batch_size)
+    pca_tgt = IncrementalPCA(n_components=pca_components_first, batch_size=incremental_batch_size)
+    
+    # Create HDF5 files
+    if os.path.exists(h5_path_source):
+        os.remove(h5_path_source)
+    features_h5_source = h5py.File(h5_path_source, 'w')
+    features_dataset_source = None
+    
+    if os.path.exists(h5_path_target):
+        os.remove(h5_path_target)
+    features_h5_target = h5py.File(h5_path_target, 'w')
+    features_dataset_target = None
+    
+    # Calculate total batches
+    total_batches = int(np.ceil(N_samples_src / batch_size))
+    
+    # Need ≥ pca_components_first samples for INITIAL fit
+    batches_needed_for_initial_fit = int(np.ceil(pca_components_first / batch_size))  # 250 batches = 2000 samples
+    
+    print(f"\nTotal batches: {total_batches}")
+    print(f"Phase 1: Initial fit on {min(batches_needed_for_initial_fit, total_batches)} batches ({min(batches_needed_for_initial_fit, total_batches) * batch_size} samples)")
+    print(f"Phase 2: Incremental fit (stacking {max_fitting_batches} batches) on ALL {total_batches} batches")
+    print(f"  Each stack = {max_fitting_batches} batches × {batch_size} samples = {max_fitting_batches * batch_size} samples per partial_fit()")
+    
+    # ============ PHASE 1: COLLECT & FIT (Initialize PCA) ============
+    print("\nPhase 1: Collecting batches for initial PCA fitting...")
+    
+    fitting_batches_src = []
+    fitting_batches_tgt = []
+    
+    for batch_idx in range(min(batches_needed_for_initial_fit, total_batches)):
+        start_idx = batch_idx * batch_size
+        end_idx = min((batch_idx + 1) * batch_size, N_samples_src)
+        
+        batch_src = data_source_flat[start_idx:end_idx]
+        batch_tgt = data_target_flat[start_idx:end_idx]
+        
+        fitting_batches_src.append(batch_src)
+        fitting_batches_tgt.append(batch_tgt)
+        
+        if (batch_idx + 1) % 50 == 0 or (batch_idx + 1) == min(batches_needed_for_initial_fit, total_batches):
+            print(f"  Collected batch {batch_idx+1}/{min(batches_needed_for_initial_fit, total_batches)}")
+    
+    # FIT on all initial samples at once (initialization)
+    print(f"\nInitializing IncrementalPCA on {len(fitting_batches_src)} batches ({len(fitting_batches_src) * batch_size} samples)...")
+    fitting_data_src = np.vstack(fitting_batches_src)
+    fitting_data_tgt = np.vstack(fitting_batches_tgt)
+    
+    pca_src.partial_fit(fitting_data_src)
+    pca_tgt.partial_fit(fitting_data_tgt)
+    
+    explained_var_src = np.sum(pca_src.explained_variance_ratio_)
+    explained_var_tgt = np.sum(pca_tgt.explained_variance_ratio_)
+    print(f"✓ PCA initialized!")
+    
+    del fitting_batches_src, fitting_batches_tgt, fitting_data_src, fitting_data_tgt
+    
+    # ============ PHASE 2: INCREMENTAL FIT + TRANSFORM + SAVE (ALL BATCHES, stacked) ============
+    print(f"\nPhase 2: Incremental fitting (stacking {max_fitting_batches} batches) + transforming on ALL {total_batches} batches...")
+    
+    batch_group_idx = 0
+    group_count = 0
+    
+    while batch_group_idx < total_batches:
+        # Collect max_fitting_batches batches
+        batch_group_src = []
+        batch_group_tgt = []
+        batch_indices = []
+        
+        for offset in range(min(max_fitting_batches, total_batches - batch_group_idx)):
+            batch_idx = batch_group_idx + offset
+            start_idx = batch_idx * batch_size
+            end_idx = min((batch_idx + 1) * batch_size, N_samples_src)
+            
+            batch_src = data_source_flat[start_idx:end_idx]
+            batch_tgt = data_target_flat[start_idx:end_idx]
+            
+            batch_group_src.append(batch_src)
+            batch_group_tgt.append(batch_tgt)
+            batch_indices.append(batch_idx)
+        
+        # Stack batches: (max_fitting_batches * batch_size, original_dim)
+        # e.g., (3 * 8, 3696) = (24, 3696)
+        batch_src_stacked = np.vstack(batch_group_src)
+        batch_tgt_stacked = np.vstack(batch_group_tgt)
+        
+        # TRANSFORM with current PCA state
+        batch_src_pca = pca_src.transform(batch_src_stacked)
+        batch_tgt_pca = pca_tgt.transform(batch_tgt_stacked)
+        
+        # LEARN from this stacked batch (incremental refinement)
+        pca_src.partial_fit(batch_src_stacked)
+        pca_tgt.partial_fit(batch_tgt_stacked)
+        
+        # Update explained variance
+        explained_var_src = np.sum(pca_src.explained_variance_ratio_)
+        explained_var_tgt = np.sum(pca_tgt.explained_variance_ratio_)
+        
+        # Save to HDF5 (source)
+        if features_dataset_source is None:
+            features_dataset_source = features_h5_source.create_dataset(
+                'features',
+                data=batch_src_pca,
+                maxshape=(None, pca_components_first),
+                chunks=True,
+                dtype='float32'
+            )
+        else:
+            features_dataset_source.resize(features_dataset_source.shape[0] + batch_src_pca.shape[0], axis=0)
+            features_dataset_source[-batch_src_pca.shape[0]:] = batch_src_pca
+        
+        # Save to HDF5 (target)
+        if features_dataset_target is None:
+            features_dataset_target = features_h5_target.create_dataset(
+                'features',
+                data=batch_tgt_pca,
+                maxshape=(None, pca_components_first),
+                chunks=True,
+                dtype='float32'
+            )
+        else:
+            features_dataset_target.resize(features_dataset_target.shape[0] + batch_tgt_pca.shape[0], axis=0)
+            features_dataset_target[-batch_tgt_pca.shape[0]:] = batch_tgt_pca
+        
+        # Print progress
+        group_count += 1
+        batch_group_idx += max_fitting_batches
+    
+
+    # Close files
+    features_h5_source.close()
+    features_h5_target.close()
+    
+    return pca_src, pca_tgt, explained_var_src, explained_var_tgt
+
+def load_and_calculate_pad(h5_path_source, h5_path_target, pca_components_second=100,
+                            stage_name="UNSCALED"):
+    """
+    Load compressed features from .h5 files, combine, and calculate PAD
+    
+    Args:
+        h5_path_source: Path to source .h5 file
+        h5_path_target: Path to target .h5 file
+        pca_components_second: Number of components for second PCA
+        stage_name: Name for logging
+    
+    Returns:
+        pad_svm, X_combined_2000d, y_combined
+    """
+    
+    print("\n" + "="*80)
+    print(f"LOADING & CALCULATING PAD - {stage_name}")
+    print("="*80)
+    
+    # Load features
+    print("\nLoading compressed features from .h5 files...")
+    with h5py.File(h5_path_source, 'r') as f_src:
+        X_source_2000d = f_src['features'][:]
+        
+    with h5py.File(h5_path_target, 'r') as f_tgt:
+        X_target_2000d = f_tgt['features'][:]
+        
+    # Combine
+    X_combined_2000d = np.vstack([X_source_2000d, X_target_2000d])
+    y_combined = np.concatenate([
+        np.zeros(len(X_source_2000d)),
+        np.ones(len(X_target_2000d))
+    ])
+
+    
+    # Calculate PAD
+    print(f"\nCalculating PAD with second PCA ({pca_components_second}D) and SVM...")
+    pad_svm = calc_pad_pca_svm(
+        X_combined_2000d,
+        y_combined,
+        final_pca_components=pca_components_second,
+        scale=True
+    )
+    
+    print(f"\n✓ PAD (SVM) [{stage_name}]: {pad_svm:.6f}")
+    
+    return pad_svm, X_combined_2000d, y_combined
+

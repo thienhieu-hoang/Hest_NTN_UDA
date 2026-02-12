@@ -10,7 +10,6 @@ import numpy as np
 from scipy.io import savemat
 import h5py
 import matplotlib.pyplot as plt
-from sklearn.decomposition import IncrementalPCA, PCA
 
 # Add the root project directory
 try:
@@ -75,7 +74,10 @@ print(f"\nSaving results to: {save_path}")
 # ============================================================================
 
 def apply_fda_translation(x_src_real, x_tgt_real, win_h=13, win_w=3):
-    """Apply FDA translation: mix source input with target style"""
+    """Apply FDA translation: mix source input with target style
+    input shapes: (N, H, W, 2) where last dim is [real, imag]
+    output shape: (N, H, W, 2) also [real, imag]
+    """
     from JMMD.helper.utils_GAN import F_extract_DD, fda_mix_pixels, F_inverse_DD, apply_phase_to_amplitude
     
     # Convert to complex
@@ -101,258 +103,68 @@ def apply_fda_translation(x_src_real, x_tgt_real, win_h=13, win_w=3):
     
     return x_fda_mixed.numpy()
 
-
-def apply_incremental_pca_and_save(data_source, data_target, h5_path_source, h5_path_target,
-                                    batch_size=8, pca_components_first=2000, 
-                                    incremental_batch_size=64, max_fitting_batches=3,
-                                    data_name="data"):
+def plot_magnitude_phase_histograms(
+    data_real, save_prefix="", stage_name="", label="",
+    mag_figsize=(10, 5), phase_figsize=(10, 5), label_font=20, numbins=500  
+):
     """
-    Apply IncrementalPCA to source and target data and save to .h5 files
-    Learn incrementally from ALL batches by stacking max_fitting_batches together
+    Plot histograms of magnitude and phase for complex data
     
     Args:
-        data_source: Source data array (N, H, W, C)
-        data_target: Target data array (N, H, W, C)
-        h5_path_source: Path to save source .h5 file
-        h5_path_target: Path to save target .h5 file
-        batch_size: Batch size for processing (8)
-        pca_components_first: Number of PCA components (2000)
-        incremental_batch_size: Batch size for IncrementalPCA (64)
-        max_fitting_batches: Number of batches to stack together for each partial_fit (3)
-        data_name: Name for logging
-    
-    Returns:
-        pca_src, pca_tgt, explained_var_src, explained_var_tgt
+        data_real: Real data with shape (N, H, W, 2) where last dim is [real, imag]
+        save_prefix: Filename prefix for saving figures
+        stage_name: Name for plot title (unused)
+        label: Source or Target label
+        mag_figsize: (width, height) for magnitude figure
+        phase_figsize: (width, height) for phase figure
     """
+    # Convert to complex (handle both NumPy and TensorFlow)
+    if tf.is_tensor(data_real):
+        data_complex = tf.complex(data_real[..., 0], data_real[..., 1])
+        magnitude = tf.abs(data_complex).numpy().flatten()
+        phase = tf.math.angle(data_complex).numpy().flatten()
+    else:
+        data_complex = data_real[..., 0] + 1j * data_real[..., 1]
+        magnitude = np.abs(data_complex).flatten()
+        phase = np.angle(data_complex).flatten()
     
-    print("\n" + "="*80)
-    print(f"APPLYING INCREMENTAL PCA TO {data_name.upper()}")
-    print("="*80)
+    # Magnitude figure
+    fig_mag, ax_mag = plt.subplots(1, 1, figsize=mag_figsize)
+    ax_mag.hist(magnitude, bins=numbins, color='blue', alpha=0.7, edgecolor='none')
+    ax_mag.set_xlabel('Magnitude', fontsize=label_font)
+    ax_mag.set_ylabel('Count', fontsize=label_font)
+    ax_mag.grid(True, alpha=0.3)
+    if magnitude.mean()<1e-4:
+        ax_mag.text(0.98, 0.98, f'Mean: {magnitude.mean()*1e8:.3f}e8\nStd: {magnitude.std()*1e8:.3f}e8',
+                    transform=ax_mag.transAxes, verticalalignment='top', horizontalalignment='right',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    else:
+        ax_mag.text(0.98, 0.98, f'Mean: {magnitude.mean():.4f}\nStd: {magnitude.std():.4f}',
+                    transform=ax_mag.transAxes, verticalalignment='top', horizontalalignment='right',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    fig_mag.tight_layout()
+    save_path_mag = f'{save_path}/{save_prefix}_{label.lower()}_magnitude_hist.png'
+    fig_mag.savefig(save_path_mag, dpi=150, bbox_inches='tight')
+    print(f"✓ Saved magnitude histogram to: {save_path_mag}")
+    plt.close(fig_mag)
     
-    # Convert TensorFlow tensor to NumPy array
-    data_source_np = data_source.numpy() if isinstance(data_source, tf.Tensor) else data_source
-    data_target_np = data_target.numpy() if isinstance(data_target, tf.Tensor) else data_target
+    # Phase figure
+    fig_phase, ax_phase = plt.subplots(1, 1, figsize=phase_figsize)
+    ax_phase.hist(phase, bins=numbins, color='red', alpha=0.7, edgecolor='none')
+    ax_phase.set_xlabel('Phase (radians)', fontsize=label_font)
+    ax_phase.set_ylabel('Count', fontsize=label_font)
+    ax_phase.grid(True, alpha=0.3)
+    ax_phase.text(0.98, 0.98, f'Mean: {phase.mean():.4f}\nStd: {phase.std():.4f}',
+                transform=ax_phase.transAxes, verticalalignment='top', horizontalalignment='right',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    fig_phase.tight_layout()
+    save_path_phase = f'{save_path}/{save_prefix}_{label.lower()}_phase_hist.png'
+    fig_phase.savefig(save_path_phase, dpi=150, bbox_inches='tight')
+    print(f"✓ Saved phase histogram to: {save_path_phase}")
+    plt.close(fig_phase)
+    
+from Domain_Adversarial.helper.PAD import apply_incremental_pca_and_save, load_and_calculate_pad
 
-    # Flatten data
-    N_samples_src = data_source_np.shape[0]
-    N_samples_tgt = data_target_np.shape[0]
-    original_dim = data_source_np.shape[1] * data_source_np.shape[2] * data_source_np.shape[3]
-    
-    data_source_flat = data_source_np.reshape(N_samples_src, -1)
-    data_target_flat = data_target_np.reshape(N_samples_tgt, -1)
-    
-    print(f"Flattened source shape: {data_source_flat.shape}")
-    print(f"Flattened target shape: {data_target_flat.shape}")
-    print(f"Original dimension: {original_dim} → Target dimension: {pca_components_first}")
-    
-    # Initialize PCA
-    pca_src = IncrementalPCA(n_components=pca_components_first, batch_size=incremental_batch_size)
-    pca_tgt = IncrementalPCA(n_components=pca_components_first, batch_size=incremental_batch_size)
-    
-    # Create HDF5 files
-    if os.path.exists(h5_path_source):
-        os.remove(h5_path_source)
-    features_h5_source = h5py.File(h5_path_source, 'w')
-    features_dataset_source = None
-    
-    if os.path.exists(h5_path_target):
-        os.remove(h5_path_target)
-    features_h5_target = h5py.File(h5_path_target, 'w')
-    features_dataset_target = None
-    
-    # Calculate total batches
-    total_batches = int(np.ceil(N_samples_src / batch_size))
-    
-    # Need ≥ pca_components_first samples for INITIAL fit
-    batches_needed_for_initial_fit = int(np.ceil(pca_components_first / batch_size))  # 250 batches = 2000 samples
-    
-    print(f"\nTotal batches: {total_batches}")
-    print(f"Phase 1: Initial fit on {min(batches_needed_for_initial_fit, total_batches)} batches ({min(batches_needed_for_initial_fit, total_batches) * batch_size} samples)")
-    print(f"Phase 2: Incremental fit (stacking {max_fitting_batches} batches) on ALL {total_batches} batches")
-    print(f"  Each stack = {max_fitting_batches} batches × {batch_size} samples = {max_fitting_batches * batch_size} samples per partial_fit()")
-    
-    # ============ PHASE 1: COLLECT & FIT (Initialize PCA) ============
-    print("\nPhase 1: Collecting batches for initial PCA fitting...")
-    
-    fitting_batches_src = []
-    fitting_batches_tgt = []
-    
-    for batch_idx in range(min(batches_needed_for_initial_fit, total_batches)):
-        start_idx = batch_idx * batch_size
-        end_idx = min((batch_idx + 1) * batch_size, N_samples_src)
-        
-        batch_src = data_source_flat[start_idx:end_idx]
-        batch_tgt = data_target_flat[start_idx:end_idx]
-        
-        fitting_batches_src.append(batch_src)
-        fitting_batches_tgt.append(batch_tgt)
-        
-        if (batch_idx + 1) % 50 == 0 or (batch_idx + 1) == min(batches_needed_for_initial_fit, total_batches):
-            print(f"  Collected batch {batch_idx+1}/{min(batches_needed_for_initial_fit, total_batches)}")
-    
-    # FIT on all initial samples at once (initialization)
-    print(f"\nInitializing IncrementalPCA on {len(fitting_batches_src)} batches ({len(fitting_batches_src) * batch_size} samples)...")
-    fitting_data_src = np.vstack(fitting_batches_src)
-    fitting_data_tgt = np.vstack(fitting_batches_tgt)
-    
-    pca_src.partial_fit(fitting_data_src)
-    pca_tgt.partial_fit(fitting_data_tgt)
-    
-    explained_var_src = np.sum(pca_src.explained_variance_ratio_)
-    explained_var_tgt = np.sum(pca_tgt.explained_variance_ratio_)
-    print(f"✓ PCA initialized!")
-    
-    del fitting_batches_src, fitting_batches_tgt, fitting_data_src, fitting_data_tgt
-    
-    # ============ PHASE 2: INCREMENTAL FIT + TRANSFORM + SAVE (ALL BATCHES, stacked) ============
-    print(f"\nPhase 2: Incremental fitting (stacking {max_fitting_batches} batches) + transforming on ALL {total_batches} batches...")
-    
-    batch_group_idx = 0
-    group_count = 0
-    
-    while batch_group_idx < total_batches:
-        # Collect max_fitting_batches batches
-        batch_group_src = []
-        batch_group_tgt = []
-        batch_indices = []
-        
-        for offset in range(min(max_fitting_batches, total_batches - batch_group_idx)):
-            batch_idx = batch_group_idx + offset
-            start_idx = batch_idx * batch_size
-            end_idx = min((batch_idx + 1) * batch_size, N_samples_src)
-            
-            batch_src = data_source_flat[start_idx:end_idx]
-            batch_tgt = data_target_flat[start_idx:end_idx]
-            
-            batch_group_src.append(batch_src)
-            batch_group_tgt.append(batch_tgt)
-            batch_indices.append(batch_idx)
-        
-        # Stack batches: (max_fitting_batches * batch_size, original_dim)
-        # e.g., (3 * 8, 3696) = (24, 3696)
-        batch_src_stacked = np.vstack(batch_group_src)
-        batch_tgt_stacked = np.vstack(batch_group_tgt)
-        
-        # TRANSFORM with current PCA state
-        batch_src_pca = pca_src.transform(batch_src_stacked)
-        batch_tgt_pca = pca_tgt.transform(batch_tgt_stacked)
-        
-        # LEARN from this stacked batch (incremental refinement)
-        pca_src.partial_fit(batch_src_stacked)
-        pca_tgt.partial_fit(batch_tgt_stacked)
-        
-        # Update explained variance
-        explained_var_src = np.sum(pca_src.explained_variance_ratio_)
-        explained_var_tgt = np.sum(pca_tgt.explained_variance_ratio_)
-        
-        # Save to HDF5 (source)
-        if features_dataset_source is None:
-            features_dataset_source = features_h5_source.create_dataset(
-                'features',
-                data=batch_src_pca,
-                maxshape=(None, pca_components_first),
-                chunks=True,
-                dtype='float32'
-            )
-        else:
-            features_dataset_source.resize(features_dataset_source.shape[0] + batch_src_pca.shape[0], axis=0)
-            features_dataset_source[-batch_src_pca.shape[0]:] = batch_src_pca
-        
-        # Save to HDF5 (target)
-        if features_dataset_target is None:
-            features_dataset_target = features_h5_target.create_dataset(
-                'features',
-                data=batch_tgt_pca,
-                maxshape=(None, pca_components_first),
-                chunks=True,
-                dtype='float32'
-            )
-        else:
-            features_dataset_target.resize(features_dataset_target.shape[0] + batch_tgt_pca.shape[0], axis=0)
-            features_dataset_target[-batch_tgt_pca.shape[0]:] = batch_tgt_pca
-        
-        # Print progress
-        group_count += 1
-        batch_group_idx += max_fitting_batches
-    
-
-    # Close files
-    features_h5_source.close()
-    features_h5_target.close()
-    
-    return pca_src, pca_tgt, explained_var_src, explained_var_tgt
-
-def load_and_calculate_pad(h5_path_source, h5_path_target, pca_components_second=100,
-                            stage_name="UNSCALED"):
-    """
-    Load compressed features from .h5 files, combine, and calculate PAD
-    
-    Args:
-        h5_path_source: Path to source .h5 file
-        h5_path_target: Path to target .h5 file
-        pca_components_second: Number of components for second PCA
-        stage_name: Name for logging
-    
-    Returns:
-        pad_svm, X_combined_2000d, y_combined
-    """
-    
-    print("\n" + "="*80)
-    print(f"LOADING & CALCULATING PAD - {stage_name}")
-    print("="*80)
-    
-    # Load features
-    print("\nLoading compressed features from .h5 files...")
-    with h5py.File(h5_path_source, 'r') as f_src:
-        X_source_2000d = f_src['features'][:]
-        
-    with h5py.File(h5_path_target, 'r') as f_tgt:
-        X_target_2000d = f_tgt['features'][:]
-        
-    # Combine
-    X_combined_2000d = np.vstack([X_source_2000d, X_target_2000d])
-    y_combined = np.concatenate([
-        np.zeros(len(X_source_2000d)),
-        np.ones(len(X_target_2000d))
-    ])
-
-    
-    # Calculate PAD
-    print(f"\nCalculating PAD with second PCA ({pca_components_second}D) and SVM...")
-    pad_svm = PAD.calc_pad_pca_svm(
-        X_combined_2000d,
-        y_combined,
-        final_pca_components=pca_components_second,
-        scale=True
-    )
-    
-    print(f"\n✓ PAD (SVM) [{stage_name}]: {pad_svm:.6f}")
-    
-    return pad_svm, X_combined_2000d, y_combined
-
-
-def plot_distributions(data_real, data_scaled=None, save_prefix="", stage_name=""):
-    """
-    Plot label/input distributions
-    
-    Args:
-        data_real: Real data (unscaled)
-        data_scaled: Scaled data (optional)
-        save_prefix: Path prefix for saving figures
-        stage_name: Name for plot title
-    """
-    
-    if data_scaled is None:
-        data_scaled = data_real
-    
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    fig.suptitle(f'Distribution Analysis: {stage_name}', fontsize=16, fontweight='bold')
-    
-    # (Implement plotting logic here - similar to original code)
-    plt.tight_layout()
-    plt.savefig(f'{save_prefix}_distributions.png', dpi=150, bbox_inches='tight')
-    print(f"✓ Saved distributions to: {save_prefix}_distributions.png")
-    plt.close()
 
 
 # ============================================================================
@@ -432,6 +244,12 @@ print("✓ Scaling complete")
 h5_path_source_unscaled = f'{save_path}/features_source_unscaled.h5'
 h5_path_target_unscaled = f'{save_path}/features_target_unscaled.h5'
 
+# Plot histograms before calculating PAD
+print("\nPlotting magnitude/phase histograms for UNSCALED inputs...")
+plot_magnitude_phase_histograms(H_input_source_real, '1a_unscaled_raw', 'UNSCALED', 'Source')
+plot_magnitude_phase_histograms(H_input_target_real, '1a_unscaled_raw', 'UNSCALED', 'Target')
+
+
 pca_src_unscaled, pca_tgt_unscaled, var_src_unscaled, var_tgt_unscaled = \
     apply_incremental_pca_and_save(
         H_input_source_real, H_input_target_real,
@@ -462,6 +280,12 @@ if os.path.exists(h5_path_target_unscaled):
 
 h5_path_source_scaled = f'{save_path}/features_source_scaled.h5'
 h5_path_target_scaled = f'{save_path}/features_target_scaled.h5'
+
+# Plot histograms before calculating PAD
+print("\nPlotting magnitude/phase histograms for SCALED inputs...")
+plot_magnitude_phase_histograms(H_input_source_scaled, '1b_scaled_raw', 'SCALED', 'Source')
+plot_magnitude_phase_histograms(H_input_target_scaled, '1b_scaled_raw', 'SCALED', 'Target')
+
 
 pca_src_scaled, pca_tgt_scaled, var_src_scaled, var_tgt_scaled = \
     apply_incremental_pca_and_save(
@@ -498,21 +322,31 @@ print("="*80)
 
 print(f"\nApplying FDA with window ({fda_win_h}, {fda_win_w})...")
 H_input_source_fda = []
+H_truePseudo = []
 
 for i in range(N_use_source):
     if (i + 1) % 20 == 0:
         print(f"  Processing sample {i+1}/{N_use_source}")
     
     tgt_idx = i % N_use_target
-    x_fda = apply_fda_translation(
-        H_input_source_real[i:i+1],
+    x_fda = apply_fda_translation(   # source input translated to target input
+        H_input_source_real[i:i+1], 
         H_input_target_real[tgt_idx:tgt_idx+1],
         win_h=fda_win_h,
         win_w=fda_win_w
     )
     H_input_source_fda.append(x_fda[0])
+    
+    y_fda_ = apply_fda_translation(   # source label translated to target input
+        H_true_source_real[tgt_idx:tgt_idx+1], 
+        H_input_target_real[i:i+1],
+        win_h=fda_win_h,
+        win_w=fda_win_w
+    )
+    H_truePseudo.append(y_fda_[0])
 
-H_input_source_fda = np.array(H_input_source_fda)
+H_input_source_fda = np.array(H_input_source_fda) 
+H_truePseudo = np.array(H_truePseudo)
 print(f"✓ FDA shape: {H_input_source_fda.shape}")
 
 # ============================================================================
@@ -523,6 +357,12 @@ print("\nCalculating PAD for FDA-translated unscaled inputs...")
 
 h5_path_source_fda = f'{save_path}/features_source_fda.h5'
 h5_path_target_fda = f'{save_path}/features_target_fda.h5'
+
+# Plot histograms before calculating PAD
+print("\nPlotting magnitude/phase histograms for UNSCALED inputs...")
+plot_magnitude_phase_histograms(H_input_source_fda, '2a_unscaled_FDA', 'UNSCALED', 'Source')
+plot_magnitude_phase_histograms(H_input_target_real, '2a_unscaled_FDA', 'UNSCALED', 'Target')
+
 
 pca_src_fda, pca_tgt_fda, var_src_fda, var_tgt_fda = \
     apply_incremental_pca_and_save(
@@ -558,12 +398,17 @@ h5_path_source_fda = f'{save_path}/features_source_fda.h5'
 h5_path_target_fda = f'{save_path}/features_target_fda.h5'
 
 H_input_source_scaled, x_min_src, x_max_src = minmaxScaler(
-    H_input_source_real, lower_range=lower_range, linear_interp=False
+    H_input_source_fda, lower_range=lower_range, linear_interp=False
 )
 
 H_input_target_scaled, x_min_tgt, x_max_tgt = minmaxScaler(
     H_input_target_real, lower_range=lower_range, linear_interp=False
 )
+
+# Plot histograms before calculating PAD
+print("\nPlotting magnitude/phase histograms for SCALED inputs...")
+plot_magnitude_phase_histograms(H_input_source_scaled, '2b_scaled_FDA', 'SCALED', 'Source')
+plot_magnitude_phase_histograms(H_input_target_scaled, '2b_scaled_FDA', 'SCALED', 'Target')
 
 pca_src_fda, pca_tgt_fda, var_src_fda, var_tgt_fda = \
     apply_incremental_pca_and_save(
@@ -589,3 +434,13 @@ if os.path.exists(h5_path_source_fda):
 if os.path.exists(h5_path_target_fda):
     os.remove(h5_path_target_fda)
     print(f"✓ Deleted: {h5_path_target_fda}")
+    
+    
+# Plot label histograms (original, unscaled only)
+print("\nPlotting magnitude/phase histograms for LABELS (original)...")
+plot_magnitude_phase_histograms(H_true_source_real, '3a_labels_original', 'LABELS', 'Source')
+plot_magnitude_phase_histograms(H_true_target_real, '3b_labels_original', 'LABELS', 'Target')
+
+# Plot label histograms (translated source labels)
+print("\nPlotting magnitude/phase histograms for TRANSLATED LABELS...")
+plot_magnitude_phase_histograms(H_truePseudo, '3c_labels_translated', 'LABELS', 'SourceFDA')
