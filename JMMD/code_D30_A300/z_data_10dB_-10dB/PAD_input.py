@@ -52,7 +52,7 @@ norm_approach = 'minmax'
 lower_range = -1
 
 batch_size = 8
-pca_components_first = 2000
+pca_components_first = 256 # 512 
 pca_components_second = 100
 incremental_batch_size = 64
 max_fitting_batches = 5 #3
@@ -189,12 +189,12 @@ print(f'N_samp_source = {N_samp_source}')
 print(f'N_samp_target = {N_samp_target}')
 
 # For testing
-N_use_source = 96
-N_use_target = 96
+# N_use_source = 96
+# N_use_target = 96
 
 # For full analysis (uncomment)
-# N_use_source = int(N_samp_source * 0.9)
-# N_use_target = int(N_samp_target * 0.9)
+N_use_source = int(N_samp_source * 0.9)
+N_use_target = int(N_samp_target * 0.9)
 
 print(f"Using {N_use_source} source and {N_use_target} target samples")
 
