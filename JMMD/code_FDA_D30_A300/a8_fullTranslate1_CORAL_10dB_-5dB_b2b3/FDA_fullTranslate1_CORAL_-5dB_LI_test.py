@@ -345,11 +345,11 @@ for sub_folder in sub_folder_:
         #     # w_dist.append(w_dist_epoc)
             
 
-        #     if os.path.exists(features_source_file):
-        #         os.remove(features_source_file)
-        #     if os.path.exists(features_target_file):
-        #         os.remove(features_target_file)
-        #     print("Time", time.perf_counter() - start, "seconds")
+            if os.path.exists(features_source_file):
+                os.remove(features_source_file)
+            if os.path.exists(features_target_file):
+                os.remove(features_target_file)
+            print("Time", time.perf_counter() - start, "seconds")
             
         
         # Average loss for the epoch
