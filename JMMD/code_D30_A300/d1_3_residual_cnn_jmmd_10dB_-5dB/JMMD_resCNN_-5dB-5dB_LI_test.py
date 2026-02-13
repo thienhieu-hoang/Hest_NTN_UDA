@@ -27,7 +27,7 @@ from JMMD.helper.utils_GAN import WeightScheduler
 
 SNR = -5
 # source_data_file_path_label = os.path.abspath(os.path.join(code_dir, '..', 'generatedChan', 'OpenNTN','H_perfect.mat'))
-source_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_D_30_sim', f'SNR_10dB', 'matlabNTN.mat'))
+source_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_D_30_sim', f'SNR_{SNR}dB', 'matlabNTN.mat'))
 target_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_A_300_sim', f'SNR_{SNR}dB', 'matlabNTN.mat'))
 norm_approach = 'minmax' # can be set to 'std'
 lower_range = -1 
@@ -109,17 +109,17 @@ indices_target = np.resize(indices_target, N_samp)
 
 # =======================================================
 ## Divide the indices into training and validation sets
-indices_train_source = indices_source[:train_size]
-indices_val_source   = indices_source[train_size:train_size + val_size]
+# indices_train_source = indices_source[:train_size]
+# indices_val_source   = indices_source[train_size:train_size + val_size]
 
-indices_train_target = indices_target[:train_size]
-indices_val_target   = indices_target[train_size:train_size + val_size]
+# indices_train_target = indices_target[:train_size]
+# indices_val_target   = indices_target[train_size:train_size + val_size]
 
 # to test code
-# indices_train_source = indices_source[:96]
-# indices_val_source = indices_source[2032:]
-# indices_train_target = indices_target[:96]
-# indices_val_target = indices_target[2032:]
+indices_train_source = indices_source[:96]
+indices_val_source = indices_source[2032:]
+indices_train_target = indices_target[:96]
+indices_val_target = indices_target[2032:]
 
 print('train_size = ', indices_train_source.shape[0])
 print('val_size = ', indices_val_source.shape[0])
@@ -156,12 +156,12 @@ from JMMD.helper.utils_GAN import post_val, train_step_cnn_residual_jmmd, val_st
 import time
 start = time.perf_counter()
 
-n_epochs= 300 # 300
-epoch_min = 100
-epoch_step = 20
-# n_epochs= 5
-# epoch_min = 0
-# epoch_step = 1
+# n_epochs= 300 # 300
+# epoch_min = 100
+# epoch_step = 20
+n_epochs= 5
+epoch_min = 0
+epoch_step = 1
 
 sub_folder_ = ['GAN_linear']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
 
