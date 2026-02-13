@@ -1,0 +1,375 @@
+Job started on rg31701 at Thu 12 Feb 2026 03:38:01 PM EST
+Code dir: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB
+Project root: /home/hieuets/Code/Hest_NTN_UDA
+
+Saving results to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_
+
+================================================================================
+LOADING DATA
+================================================================================
+N_samp_source = 2048
+N_samp_target = 2048
+Using 1843 source and 1843 target samples
+H_input_source: (1843, 132, 14, 2)
+H_input_target: (1843, 132, 14, 2)
+
+================================================================================
+SCALING INPUTS TO [-1, 1]
+================================================================================
+✓ Scaling complete
+
+Plotting magnitude/phase histograms for UNSCALED inputs...
+✓ Saved magnitude histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/1a_unscaled_raw_source_magnitude_hist.png
+✓ Saved phase histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/1a_unscaled_raw_source_phase_hist.png
+✓ Saved magnitude histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/1a_unscaled_raw_target_magnitude_hist.png
+✓ Saved phase histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/1a_unscaled_raw_target_phase_hist.png
+
+================================================================================
+APPLYING INCREMENTAL PCA TO UNSCALED
+================================================================================
+Flattened source shape: (1843, 3696)
+Flattened target shape: (1843, 3696)
+Original dimension: 3696 → Target dimension: 256
+
+Total batches: 231
+Phase 1: Initial fit on 32 batches (256 samples)
+Phase 2: Incremental fit (stacking 5 batches) on ALL 231 batches
+  Each stack = 5 batches × 8 samples = 40 samples per partial_fit()
+
+Phase 1: Collecting batches for initial PCA fitting...
+  Collected batch 32/32
+
+Initializing IncrementalPCA on 32 batches (256 samples)...
+✓ PCA initialized!
+
+Phase 2: Incremental fitting (stacking 5 batches) + transforming on ALL 231 batches...
+
+================================================================================
+LOADING & CALCULATING PAD - UNSCALED
+================================================================================
+
+Loading compressed features from .h5 files...
+
+Calculating PAD with second PCA (100D) and SVM...
+Applying second PCA: 256 → 100 dimensions
+  Explained variance: 1.0000
+  Final feature shape: (1843, 100)
+== C: 0.01, Error rate: 0.5117
+== C: 0.1, Error rate: 0.4243
+== C: 0.5, Error rate: 0.2518
+== C: 1.0, Error rate: 0.1101
+== C: 2.0, Error rate: 0.0510
+== C: 5.0, Error rate: 0.0277
+== C: 10.0, Error rate: 0.0212
+== C: 50.0, Error rate: 0.0147
+== C: 100.0, Error rate: 0.0130
+== C: 500.0, Error rate: 0.0109
+== C: 1000.0, Error rate: 0.0103
+Best C: 1000.0, Best error rate: 0.0103
+============ PAD (SVM) = 1.9588
+
+✓ PAD (SVM) [UNSCALED]: 1.958763
+✓ Deleted: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/features_source_unscaled.h5
+✓ Deleted: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/features_target_unscaled.h5
+
+Plotting magnitude/phase histograms for SCALED inputs...
+✓ Saved magnitude histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/1b_scaled_raw_source_magnitude_hist.png
+✓ Saved phase histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/1b_scaled_raw_source_phase_hist.png
+✓ Saved magnitude histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/1b_scaled_raw_target_magnitude_hist.png
+✓ Saved phase histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/1b_scaled_raw_target_phase_hist.png
+
+================================================================================
+APPLYING INCREMENTAL PCA TO SCALED
+================================================================================
+Flattened source shape: (1843, 3696)
+Flattened target shape: (1843, 3696)
+Original dimension: 3696 → Target dimension: 256
+
+Total batches: 231
+Phase 1: Initial fit on 32 batches (256 samples)
+Phase 2: Incremental fit (stacking 5 batches) on ALL 231 batches
+  Each stack = 5 batches × 8 samples = 40 samples per partial_fit()
+
+Phase 1: Collecting batches for initial PCA fitting...
+  Collected batch 32/32
+
+Initializing IncrementalPCA on 32 batches (256 samples)...
+✓ PCA initialized!
+
+Phase 2: Incremental fitting (stacking 5 batches) + transforming on ALL 231 batches...
+
+================================================================================
+LOADING & CALCULATING PAD - SCALED
+================================================================================
+
+Loading compressed features from .h5 files...
+
+Calculating PAD with second PCA (100D) and SVM...
+Applying second PCA: 256 → 100 dimensions
+  Explained variance: 1.0000
+  Final feature shape: (1843, 100)
+== C: 0.01, Error rate: 0.5117
+== C: 0.1, Error rate: 0.4254
+== C: 0.5, Error rate: 0.2235
+== C: 1.0, Error rate: 0.1601
+== C: 2.0, Error rate: 0.1264
+== C: 5.0, Error rate: 0.0901
+== C: 10.0, Error rate: 0.0743
+== C: 50.0, Error rate: 0.0461
+== C: 100.0, Error rate: 0.0396
+== C: 500.0, Error rate: 0.0255
+== C: 1000.0, Error rate: 0.0222
+Best C: 1000.0, Best error rate: 0.0222
+============ PAD (SVM) = 1.9110
+
+✓ PAD (SVM) [SCALED]: 1.911015
+✓ Deleted: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/features_source_scaled.h5
+✓ Deleted: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/features_target_scaled.h5
+
+================================================================================
+APPLYING FDA TRANSLATION
+================================================================================
+
+Applying FDA with window (13, 3)...
+  Processing sample 20/1843
+  Processing sample 40/1843
+  Processing sample 60/1843
+  Processing sample 80/1843
+  Processing sample 100/1843
+  Processing sample 120/1843
+  Processing sample 140/1843
+  Processing sample 160/1843
+  Processing sample 180/1843
+  Processing sample 200/1843
+  Processing sample 220/1843
+  Processing sample 240/1843
+  Processing sample 260/1843
+  Processing sample 280/1843
+  Processing sample 300/1843
+  Processing sample 320/1843
+  Processing sample 340/1843
+  Processing sample 360/1843
+  Processing sample 380/1843
+  Processing sample 400/1843
+  Processing sample 420/1843
+  Processing sample 440/1843
+  Processing sample 460/1843
+  Processing sample 480/1843
+  Processing sample 500/1843
+  Processing sample 520/1843
+  Processing sample 540/1843
+  Processing sample 560/1843
+  Processing sample 580/1843
+  Processing sample 600/1843
+  Processing sample 620/1843
+  Processing sample 640/1843
+  Processing sample 660/1843
+  Processing sample 680/1843
+  Processing sample 700/1843
+  Processing sample 720/1843
+  Processing sample 740/1843
+  Processing sample 760/1843
+  Processing sample 780/1843
+  Processing sample 800/1843
+  Processing sample 820/1843
+  Processing sample 840/1843
+  Processing sample 860/1843
+  Processing sample 880/1843
+  Processing sample 900/1843
+  Processing sample 920/1843
+  Processing sample 940/1843
+  Processing sample 960/1843
+  Processing sample 980/1843
+  Processing sample 1000/1843
+  Processing sample 1020/1843
+  Processing sample 1040/1843
+  Processing sample 1060/1843
+  Processing sample 1080/1843
+  Processing sample 1100/1843
+  Processing sample 1120/1843
+  Processing sample 1140/1843
+  Processing sample 1160/1843
+  Processing sample 1180/1843
+  Processing sample 1200/1843
+  Processing sample 1220/1843
+  Processing sample 1240/1843
+  Processing sample 1260/1843
+  Processing sample 1280/1843
+  Processing sample 1300/1843
+  Processing sample 1320/1843
+  Processing sample 1340/1843
+  Processing sample 1360/1843
+  Processing sample 1380/1843
+  Processing sample 1400/1843
+  Processing sample 1420/1843
+  Processing sample 1440/1843
+  Processing sample 1460/1843
+  Processing sample 1480/1843
+  Processing sample 1500/1843
+  Processing sample 1520/1843
+  Processing sample 1540/1843
+  Processing sample 1560/1843
+  Processing sample 1580/1843
+  Processing sample 1600/1843
+  Processing sample 1620/1843
+  Processing sample 1640/1843
+  Processing sample 1660/1843
+  Processing sample 1680/1843
+  Processing sample 1700/1843
+  Processing sample 1720/1843
+  Processing sample 1740/1843
+  Processing sample 1760/1843
+  Processing sample 1780/1843
+  Processing sample 1800/1843
+  Processing sample 1820/1843
+  Processing sample 1840/1843
+✓ FDA shape: (1843, 132, 14, 2)
+
+Calculating PAD for FDA-translated unscaled inputs...
+
+Plotting magnitude/phase histograms for UNSCALED inputs...
+✓ Saved magnitude histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/2a_unscaled_FDA_source_magnitude_hist.png
+✓ Saved phase histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/2a_unscaled_FDA_source_phase_hist.png
+✓ Saved magnitude histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/2a_unscaled_FDA_target_magnitude_hist.png
+✓ Saved phase histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/2a_unscaled_FDA_target_phase_hist.png
+
+================================================================================
+APPLYING INCREMENTAL PCA TO FDA_UNSCALED
+================================================================================
+Flattened source shape: (1843, 3696)
+Flattened target shape: (1843, 3696)
+Original dimension: 3696 → Target dimension: 256
+
+Total batches: 231
+Phase 1: Initial fit on 32 batches (256 samples)
+Phase 2: Incremental fit (stacking 5 batches) on ALL 231 batches
+  Each stack = 5 batches × 8 samples = 40 samples per partial_fit()
+
+Phase 1: Collecting batches for initial PCA fitting...
+  Collected batch 32/32
+
+Initializing IncrementalPCA on 32 batches (256 samples)...
+✓ PCA initialized!
+
+Phase 2: Incremental fitting (stacking 5 batches) + transforming on ALL 231 batches...
+
+================================================================================
+LOADING & CALCULATING PAD - FDA_UNSCALED
+================================================================================
+
+Loading compressed features from .h5 files...
+
+Calculating PAD with second PCA (100D) and SVM...
+Applying second PCA: 256 → 100 dimensions
+  Explained variance: 1.0000
+  Final feature shape: (1843, 100)
+== C: 0.01, Error rate: 0.5117
+== C: 0.1, Error rate: 0.5117
+== C: 0.5, Error rate: 0.3505
+== C: 1.0, Error rate: 0.2333
+== C: 2.0, Error rate: 0.1324
+== C: 5.0, Error rate: 0.0619
+== C: 10.0, Error rate: 0.0374
+== C: 50.0, Error rate: 0.0304
+== C: 100.0, Error rate: 0.0309
+== C: 500.0, Error rate: 0.0385
+== C: 1000.0, Error rate: 0.0402
+Best C: 50.0, Best error rate: 0.0304
+============ PAD (SVM) = 1.8785
+
+✓ PAD (SVM) [FDA_UNSCALED]: 1.878459
+✓ Deleted: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/features_source_fda.h5
+✓ Deleted: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/features_target_fda.h5
+
+Calculating PAD for FDA-translated scaled inputs...
+
+Plotting magnitude/phase histograms for SCALED inputs...
+✓ Saved magnitude histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/2b_scaled_FDA_source_magnitude_hist.png
+✓ Saved phase histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/2b_scaled_FDA_source_phase_hist.png
+✓ Saved magnitude histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/2b_scaled_FDA_target_magnitude_hist.png
+✓ Saved phase histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/2b_scaled_FDA_target_phase_hist.png
+
+================================================================================
+APPLYING INCREMENTAL PCA TO FDA_SCALED
+================================================================================
+Flattened source shape: (1843, 3696)
+Flattened target shape: (1843, 3696)
+Original dimension: 3696 → Target dimension: 256
+
+Total batches: 231
+Phase 1: Initial fit on 32 batches (256 samples)
+Phase 2: Incremental fit (stacking 5 batches) on ALL 231 batches
+  Each stack = 5 batches × 8 samples = 40 samples per partial_fit()
+
+Phase 1: Collecting batches for initial PCA fitting...
+  Collected batch 32/32
+
+Initializing IncrementalPCA on 32 batches (256 samples)...
+✓ PCA initialized!
+
+Phase 2: Incremental fitting (stacking 5 batches) + transforming on ALL 231 batches...
+
+================================================================================
+LOADING & CALCULATING PAD - FDA_SCALED
+================================================================================
+
+Loading compressed features from .h5 files...
+
+Calculating PAD with second PCA (100D) and SVM...
+Applying second PCA: 256 → 100 dimensions
+  Explained variance: 0.9996
+  Final feature shape: (1843, 100)
+== C: 0.01, Error rate: 0.5117
+== C: 0.1, Error rate: 0.4346
+== C: 0.5, Error rate: 0.3744
+== C: 1.0, Error rate: 0.3256
+== C: 2.0, Error rate: 0.2556
+== C: 5.0, Error rate: 0.1617
+== C: 10.0, Error rate: 0.1145
+== C: 50.0, Error rate: 0.0667
+== C: 100.0, Error rate: 0.0581
+== C: 500.0, Error rate: 0.0602
+== C: 1000.0, Error rate: 0.0613
+Best C: 100.0, Best error rate: 0.0581
+============ PAD (SVM) = 1.7678
+
+✓ PAD (SVM) [FDA_SCALED]: 1.767770
+✓ Deleted: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/features_source_fda.h5
+✓ Deleted: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/features_target_fda.h5
+
+Plotting magnitude/phase histograms for LABELS (original)...
+✓ Saved magnitude histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/3a_labels_original_source_magnitude_hist.png
+✓ Saved phase histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/3a_labels_original_source_phase_hist.png
+✓ Saved magnitude histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/3b_labels_original_target_magnitude_hist.png
+✓ Saved phase histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/3b_labels_original_target_phase_hist.png
+
+Plotting magnitude/phase histograms for TRANSLATED LABELS...
+✓ Saved magnitude histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/3c_labels_translated_sourcefda_magnitude_hist.png
+✓ Saved phase histogram to: /home/hieuets/Code/Hest_NTN_UDA/JMMD/code_D30_A300/z_data_10dB_5dB/results/ver1_/3c_labels_translated_sourcefda_phase_hist.png
+Job finished at Thu 12 Feb 2026 03:39:52 PM EST
+Python 3.11.5
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2023 NVIDIA Corporation
+Built on Tue_Aug_15_22:02:13_PDT_2023
+Cuda compilation tools, release 12.2, V12.2.140
+Build cuda_12.2.r12.2/compiler.33191640_0
+Thu Feb 12 15:39:53 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 570.211.01             Driver Version: 570.211.01     CUDA Version: 12.8     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100 80GB HBM3          Off |   00000000:5F:00.0 Off |                    0 |
+| N/A   50C    P0            127W /  700W |       0MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
