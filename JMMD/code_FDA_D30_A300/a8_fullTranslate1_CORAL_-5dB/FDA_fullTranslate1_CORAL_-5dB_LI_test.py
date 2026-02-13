@@ -333,7 +333,7 @@ for sub_folder in sub_folder_:
             pad_svm_epoc, _, _ = PAD.load_and_calculate_pad(features_source_file, features_target_file, stage_name=stage_name)
             
         #     ## Distribution of extracted features
-        #     plotfig.plotHist(features_source_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'source_epoch_{epoch+1}', percent=99)
+        #     plotfig.plotHist(features_source_file, fig_show = False, save_path=f"{model, stage_name=stage_name_path}/{sub_folder}/Distribution/", name=f'source_epoch_{epoch+1}', percent=99)
         #     plotfig.plotHist(features_target_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'target_epoch_{epoch+1}', percent=99)
         #     #
         #     plotfig.plotHist(features_source_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'source_epoch_{epoch+1}', percent=100)

@@ -5570,6 +5570,127 @@ def val_step_wgan_gp_coral_residual(model, loader_H, loss_fn, lower_range, coral
         return H_sample, epoc_eval_return, H_gen
     return H_sample, epoc_eval_return
 
+def save_features_with_incremental_pca(features_src, features_tgt, 
+                                    pca_src, pca_tgt, pca_fitted,
+                                    refit_buffer_src, refit_buffer_tgt,
+                                    features_dataset_source, features_dataset_target,
+                                    features_h5_source, features_h5_target,
+                                    batch_idx, pca_components, 
+                                    batches_for_first_fit, pca_refit_batches):
+    """
+    Helper function to save features with Incremental PCA compression
+    
+    Args:
+        features_src/tgt: Extracted features from model (tensor)
+        pca_src/tgt: IncrementalPCA objects
+        pca_fitted: bool, whether PCA is already fitted
+        fitting_batches_src/tgt: lists to accumulate batches for first fit
+        features_dataset_src/tgt: HDF5 dataset references
+        features_h5_src/tgt: HDF5 file handles
+        batch_idx: current batch index
+        pca_components: target number of PCA components
+        batches_for_first_fit: number of batches to use for initial fit
+        pca_refit_batches: number of batches between periodic refits
+    
+    Returns:
+        Updated: pca_fitted, refit_buffer_src/tgt, features_dataset_src/tgt, pca_src/tgt
+    """
+    
+    # Extract and flatten features
+    features_np_source = features_src[-1].numpy()
+    if len(features_np_source.shape) > 2:
+        features_np_source = features_np_source.reshape(features_np_source.shape[0], -1)
+    
+    features_np_target = features_tgt[-1].numpy()
+    if len(features_np_target.shape) > 2:
+        features_np_target = features_np_target.reshape(features_np_target.shape[0], -1)
+    
+    print(f'Batch {batch_idx+1}: Original feature shape - Source: {features_np_source.shape}, Target: {features_np_target.shape}')
+    
+    if not pca_fitted:
+        # === PHASE 1: Collect batches for PCA fitting ===
+        refit_buffer_src.append(features_np_source)
+        refit_buffer_tgt.append(features_np_target)
+        
+        if len(refit_buffer_src) >= batches_for_first_fit:
+            print(f"Fitting Incremental PCA on collected batches...")
+            fitting_data_src = np.vstack(refit_buffer_src)
+            fitting_data_tgt = np.vstack(refit_buffer_tgt)
+            
+            # Cap components to available samples
+            n_fit = fitting_data_src.shape[0]
+            n_comp = min(pca_components, n_fit)
+            if n_comp != pca_src.n_components:
+                pca_src = IncrementalPCA(n_components=n_comp, batch_size=64)
+                pca_tgt = IncrementalPCA(n_components=n_comp, batch_size=64)
+            
+            pca_src.partial_fit(fitting_data_src)
+            pca_tgt.partial_fit(fitting_data_tgt)
+            
+            # Transform and save buffered batches
+            print("Transforming and saving fitting batches...")
+            for b in refit_buffer_src:
+                b_pca = pca_src.transform(b)
+                if features_dataset_source is None:
+                    features_dataset_source = features_h5_source.create_dataset(
+                        'features', data=b_pca,
+                        maxshape=(None, b_pca.shape[1]), chunks=True
+                    )
+                else:
+                    features_dataset_source.resize(features_dataset_source.shape[0] + b_pca.shape[0], axis=0)
+                    features_dataset_source[-b_pca.shape[0]:] = b_pca
+            
+            for b in refit_buffer_tgt:
+                b_pca = pca_tgt.transform(b)
+                if features_dataset_target is None:
+                    features_dataset_target = features_h5_target.create_dataset(
+                        'features', data=b_pca,
+                        maxshape=(None, b_pca.shape[1]), chunks=True
+                    )
+                else:
+                    features_dataset_target.resize(features_dataset_target.shape[0] + b_pca.shape[0], axis=0)
+                    features_dataset_target[-b_pca.shape[0]:] = b_pca
+            
+            # Clear and mark as fitted
+            del refit_buffer_src[:], refit_buffer_tgt[:]
+            pca_fitted = True
+            
+            explained_var_src = np.sum(pca_src.explained_variance_ratio_)
+            explained_var_tgt = np.sum(pca_tgt.explained_variance_ratio_)
+            print(f"PCA fitted! Explained variance - Source: {explained_var_src:.4f}, Target: {explained_var_tgt:.4f}")
+            print(f"Compression: {features_np_source.shape[1]} -> {n_comp} dimensions")
+    
+    else:
+        # === PHASE 2: Periodic PCA updates ===
+        refit_buffer_src = [features_np_source]
+        refit_buffer_tgt = [features_np_target]
+        
+        # Collect batches until refit_batches threshold
+        if len(refit_buffer_src) >= pca_refit_batches:
+            fit_src = np.vstack(refit_buffer_src)
+            fit_tgt = np.vstack(refit_buffer_tgt)
+            
+            # Update PCA incrementally
+            pca_src.partial_fit(fit_src)
+            pca_tgt.partial_fit(fit_tgt)
+            
+            # Transform and save
+            for b in refit_buffer_src:
+                b_pca = pca_src.transform(b)
+                features_dataset_source.resize(features_dataset_source.shape[0] + b_pca.shape[0], axis=0)
+                features_dataset_source[-b_pca.shape[0]:] = b_pca
+            
+            for b in refit_buffer_tgt:
+                b_pca = pca_tgt.transform(b)
+                features_dataset_target.resize(features_dataset_target.shape[0] + b_pca.shape[0], axis=0)
+                features_dataset_target[-b_pca.shape[0]:] = b_pca
+            
+            print(f"Batch {batch_idx+1}: Transformed and saved - "
+                f"Source: {features_np_source.shape} -> {b_pca.shape}, "
+                f"Target: {features_np_target.shape} -> {b_pca.shape}")
+    
+    return pca_fitted, pca_src, pca_tgt, features_dataset_source, features_dataset_target
+
 def train_step_cnn_residual_coral(model_cnn, loader_H, loss_fn, optimizer, lower_range=-1, 
                         coral_loss_fn=None,save_features=False, nsymb=14, weights=None, linear_interp=False,
                         pca_components=256, pca_batch_size=64, pca_refit_batches=3):
@@ -5708,91 +5829,16 @@ def train_step_cnn_residual_coral(model_cnn, loader_H, loss_fn, optimizer, lower
         
         # === Save features if required ===
         if save_features and (domain_weight != 0):
-            # move to CPU RAM as NumPy
-            features_np_source = np.array(features_src[-1].numpy(), copy=True)
-            features_np_target = np.array(features_tgt[-1].numpy(), copy=True)
-            
-            # flatten to 2D
-            if features_np_source.ndim > 2:
-                features_np_source = features_np_source.reshape(features_np_source.shape[0], -1)
-            if features_np_target.ndim > 2:
-                features_np_target = features_np_target.reshape(features_np_target.shape[0], -1)
-
-            # First fit: stack enough batches to reach pca_components samples
-            if not pca_fitted:
-                refit_buffer_src.append(features_np_source)
-                refit_buffer_tgt.append(features_np_target)
-
-                if len(refit_buffer_src) >= batches_for_first_fit:
-                    fit_src = np.vstack(refit_buffer_src)
-                    fit_tgt = np.vstack(refit_buffer_tgt)
-
-                    # cap components to available samples
-                    n_fit = fit_src.shape[0]
-                    n_comp = min(pca_components, n_fit)
-                    if n_comp != pca_src.n_components:
-                        pca_src = IncrementalPCA(n_components=n_comp, batch_size=pca_batch_size)
-                        pca_tgt = IncrementalPCA(n_components=n_comp, batch_size=pca_batch_size)
-
-                    pca_src.partial_fit(fit_src)
-                    pca_tgt.partial_fit(fit_tgt)
-
-                    # transform + save buffered batches
-                    for b in refit_buffer_src:
-                        b_pca = pca_src.transform(b)
-                        if features_dataset_source is None:
-                            features_dataset_source = features_h5_source.create_dataset(
-                                'features', data=b_pca, maxshape=(None, b_pca.shape[1]), chunks=True
-                            )
-                        else:
-                            features_dataset_source.resize(features_dataset_source.shape[0] + b_pca.shape[0], axis=0)
-                            features_dataset_source[-b_pca.shape[0]:] = b_pca
-
-                    for b in refit_buffer_tgt:
-                        b_pca = pca_tgt.transform(b)
-                        if features_dataset_target is None:
-                            features_dataset_target = features_h5_target.create_dataset(
-                                'features', data=b_pca, maxshape=(None, b_pca.shape[1]), chunks=True
-                            )
-                        else:
-                            features_dataset_target.resize(features_dataset_target.shape[0] + b_pca.shape[0], axis=0)
-                            features_dataset_target[-b_pca.shape[0]:] = b_pca
-
-                    # free RAM
-                    del fit_src, fit_tgt
-                    refit_buffer_src.clear()
-                    refit_buffer_tgt.clear()
-                    pca_fitted = True
-
-            else:
-                # Later: collect small buffer (3–5 batches), partial_fit, transform, save
-                refit_buffer_src.append(features_np_source)
-                refit_buffer_tgt.append(features_np_target)
-
-                if len(refit_buffer_src) >= pca_refit_batches:
-                    fit_src = np.vstack(refit_buffer_src)
-                    fit_tgt = np.vstack(refit_buffer_tgt)
-
-                    pca_src.partial_fit(fit_src)
-                    pca_tgt.partial_fit(fit_tgt)
-
-                    for b in refit_buffer_src:
-                        b_pca = pca_src.transform(b)
-                        features_dataset_source.resize(features_dataset_source.shape[0] + b_pca.shape[0], axis=0)
-                        features_dataset_source[-b_pca.shape[0]:] = b_pca
-
-                    for b in refit_buffer_tgt:
-                        b_pca = pca_tgt.transform(b)
-                        features_dataset_target.resize(features_dataset_target.shape[0] + b_pca.shape[0], axis=0)
-                        features_dataset_target[-b_pca.shape[0]:] = b_pca
-
-                    # free RAM
-                    del fit_src, fit_tgt
-                    refit_buffer_src.clear()
-                    refit_buffer_tgt.clear()
-
-            # free per-batch RAM
-            del features_np_source, features_np_target
+            pca_fitted, pca_src, pca_tgt, features_dataset_source, features_dataset_target = \
+                                        save_features_with_incremental_pca(
+                                            features_src, features_tgt,
+                                            pca_src, pca_tgt, pca_fitted,
+                                            refit_buffer_src, refit_buffer_tgt,
+                                            features_dataset_source, features_dataset_target,
+                                            features_h5_source, features_h5_target,
+                                            batch_idx, pca_components,
+                                            batches_for_first_fit, pca_refit_batches
+        )
         
         # Single optimizer update (no discriminator)
         grads = tape.gradient(total_loss, model_cnn.trainable_variables)
@@ -8899,7 +8945,8 @@ def train_step_cnn_residual_fda_fullTranslation2(model_cnn, loader_H, loss_fn, o
 ##    
 def train_step_cnn_residual_FDAfullTranslation1_coral(model_cnn, loader_H, loss_fn, optimizer, lower_range=-1, 
                                             save_features=False, nsymb=14, weights=None, linear_interp=False,
-                                            fda_win_h=13, fda_win_w=3, fda_weight=1.0, coral_loss_fn=None, flag_residual_reg=True):
+                                            fda_win_h=13, fda_win_w=3, fda_weight=1.0, coral_loss_fn=None, flag_residual_reg=True,
+                                            pca_components=256, pca_batch_size=64, pca_refit_batches=3):
     """
     CNN-only residual training step combining FDA Full Translation 1 + CORAL domain adaptation
     
@@ -8957,6 +9004,17 @@ def train_step_cnn_residual_FDAfullTranslation1_coral(model_cnn, loader_H, loss_
     features_tgt_raw = None
     
     if save_features and domain_weight != 0:
+        # === Incremental PCA setup (CPU RAM only) ===
+        pca_src = IncrementalPCA(n_components=pca_components, batch_size=pca_batch_size)
+        pca_tgt = IncrementalPCA(n_components=pca_components, batch_size=pca_batch_size)
+        pca_fitted = False
+
+        # how many batches to stack for first fit
+        batches_for_first_fit = int(np.ceil(pca_components / loader_H_input_train_src.batch_size))
+        refit_buffer_src = []
+        refit_buffer_tgt = []
+
+        # h5 files
         features_h5_path_source = 'features_source.h5'
         if os.path.exists(features_h5_path_source):
             os.remove(features_h5_path_source)
@@ -8965,7 +9023,7 @@ def train_step_cnn_residual_FDAfullTranslation1_coral(model_cnn, loader_H, loss_
 
         features_h5_path_target = 'features_target.h5'
         if os.path.exists(features_h5_path_target):
-            os.remove(features_h5_path_target)   
+            os.remove(features_h5_path_target)
         features_h5_target = h5py.File(features_h5_path_target, 'w')
         features_dataset_target = None
     
@@ -9169,33 +9227,18 @@ def train_step_cnn_residual_FDAfullTranslation1_coral(model_cnn, loader_H, loss_
         epoc_loss_est_target += est_loss_tgt.numpy() * x_tgt.shape[0]
         
         # === Save features if required ===
-        if save_features and domain_weight != 0:
-            # Save FDA features
-            features_np_fda = features_fda[-1].numpy()
-            if features_dataset_source is None:
-                features_dataset_source = features_h5_source.create_dataset(
-                    'features',
-                    data=features_np_fda,
-                    maxshape=(None,) + features_np_fda.shape[1:],
-                    chunks=True
-                )
-            else:
-                features_dataset_source.resize(features_dataset_source.shape[0] + features_np_fda.shape[0], axis=0)
-                features_dataset_source[-features_np_fda.shape[0]:] = features_np_fda
-                
-            # Save raw target features
-            features_np_target = features_tgt_raw[-1].numpy()
-            if features_dataset_target is None:
-                features_dataset_target = features_h5_target.create_dataset(
-                    'features',
-                    data=features_np_target,
-                    maxshape=(None,) + features_np_target.shape[1:],
-                    chunks=True
-                )
-            else:
-                features_dataset_target.resize(features_dataset_target.shape[0] + features_np_target.shape[0], axis=0)
-                features_dataset_target[-features_np_target.shape[0]:] = features_np_target
-        
+        if save_features and (domain_weight != 0):
+            pca_fitted, pca_src, pca_tgt, features_dataset_source, features_dataset_target = \
+                                        save_features_with_incremental_pca(
+                                            features_fda, features_tgt_raw,
+                                            pca_src, pca_tgt, pca_fitted,
+                                            refit_buffer_src, refit_buffer_tgt,
+                                            features_dataset_source, features_dataset_target,
+                                            features_h5_source, features_h5_target,
+                                            batch_idx, pca_components,
+                                            batches_for_first_fit, pca_refit_batches
+        )
+                                        
         # Single optimizer update
         grads = tape.gradient(total_loss, model_cnn.trainable_variables)
         optimizer.apply_gradients(zip(grads, model_cnn.trainable_variables))

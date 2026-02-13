@@ -288,7 +288,7 @@ for sub_folder in sub_folder_:
         loss_fn = [loss_fn_ce, loss_fn_bce]
     
         ##########################
-        if epoch==0 or epoch == n_epochs-1:
+        if epoch == n_epochs-1:
             # return_features == return features to calculate PAD
             return_features = True
             epoc_pad.append(epoch)
@@ -325,7 +325,7 @@ for sub_folder in sub_folder_:
             # pad_metrics['pad_pca_svm'][f'epoch_{epoch+1}'] = pad_svm_epoc
             # pad_metrics['pad_pca_lda'][f'epoch_{epoch+1}'] = pad_lda_epoc
             # pad_metrics['pad_pca_logreg'][f'epoch_{epoch+1}'] = pad_logreg_epoc
-            pad_svm_epoc, _, _ = PAD.load_and_calculate_pad(features_source_file, features_target_file)
+            pad_svm_epoc, _, _ = PAD.load_and_calculate_pad(features_source_file, features_target_file, stage_name=stage_name)
             
             
         #     ## Distribution of extracted features

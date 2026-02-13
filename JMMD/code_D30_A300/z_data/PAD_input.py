@@ -143,7 +143,7 @@ def plot_magnitude_phase_histograms(
                     transform=ax_mag.transAxes, verticalalignment='top', horizontalalignment='right',
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     fig_mag.tight_layout()
-    save_path_mag = f'{save_path}/{save_prefix}_{label.lower()}_magnitude_hist.png'
+    save_path_mag = f'{save_path}/{save_prefix}_{label.lower()}_magnitude_hist.pdf'
     fig_mag.savefig(save_path_mag, dpi=150, bbox_inches='tight')
     print(f"✓ Saved magnitude histogram to: {save_path_mag}")
     plt.close(fig_mag)
@@ -158,7 +158,7 @@ def plot_magnitude_phase_histograms(
                 transform=ax_phase.transAxes, verticalalignment='top', horizontalalignment='right',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     fig_phase.tight_layout()
-    save_path_phase = f'{save_path}/{save_prefix}_{label.lower()}_phase_hist.png'
+    save_path_phase = f'{save_path}/{save_prefix}_{label.lower()}_phase_hist.pdf'
     fig_phase.savefig(save_path_phase, dpi=150, bbox_inches='tight')
     print(f"✓ Saved phase histogram to: {save_path_phase}")
     plt.close(fig_phase)
