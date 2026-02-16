@@ -2781,11 +2781,11 @@ def post_val(epoc_val_return, epoch, n_epochs, val_metrics, domain_weight=None):
                 print(f"epoch {epoch+1}/{n_epochs} (Val) domain Loss: {epoc_val_return['avg_domain_loss']:.6f}")
             if 'val_domain_disc_loss' in val_metrics:
                 val_metrics['val_domain_disc_loss'].append(epoc_val_return['avg_domain_disc_loss'])
-                print(f"epoch {epoch+1}/{n_epochs} (Val) Domain Discriminator Loss: {epoc_val_return['avg_domain_disc_loss']:.6f}")
+                print(f"epoch {epoch+1}/{n_epochs} (Val) Domain Loss: {epoc_val_return['avg_domain_disc_loss']:.6f}")
             
         if 'avg_domain_disc_loss' in epoc_val_return:
             val_metrics['val_domain_loss'].append(epoc_val_return['avg_domain_disc_loss'])
-            print(f"epoch {epoch+1}/{n_epochs} (Val) Domain Discriminator Loss: {epoc_val_return['avg_domain_disc_loss']:.6f}")
+            print(f"epoch {epoch+1}/{n_epochs} (Val) Domain Loss: {epoc_val_return['avg_domain_disc_loss']:.6f}")
     
     val_metrics['nmse_val_source'].append(epoc_val_return['avg_nmse_source'])
     val_metrics['nmse_val_target'].append(epoc_val_return['avg_nmse_target'])
