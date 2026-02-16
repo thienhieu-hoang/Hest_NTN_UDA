@@ -16,7 +16,6 @@ try:
 except ImportError:
     import utils  # For direct execution context
 
-
 @dataclass
 class train_step_Output:
     """Dataclass to hold the output of the train_step function."""
@@ -1899,4 +1898,6 @@ def load_checkpoint(model, model_path, sub_folder, epoch_load, optimizer=None, d
     print(f"Checkpoint restored: {checkpoint_path}")
     
     return gen_optimizer, disc_optimizer, domain_optimizer
+            
+#####################
             
