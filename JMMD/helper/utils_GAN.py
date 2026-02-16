@@ -2776,8 +2776,13 @@ def post_val(epoc_val_return, epoch, n_epochs, val_metrics, domain_weight=None):
     
     if domain_weight!=0:
         if 'avg_domain_loss' in epoc_val_return:
-            val_metrics['val_domain_loss'].append(epoc_val_return['avg_domain_loss'])
-            print(f"epoch {epoch+1}/{n_epochs} (Val) domain Loss: {epoc_val_return['avg_domain_loss']:.6f}")
+            if 'val_domain_loss' in val_metrics:
+                val_metrics['val_domain_loss'].append(epoc_val_return['avg_domain_loss'])
+                print(f"epoch {epoch+1}/{n_epochs} (Val) domain Loss: {epoc_val_return['avg_domain_loss']:.6f}")
+            if 'val_domain_disc_loss' in val_metrics:
+                val_metrics['val_domain_disc_loss'].append(epoc_val_return['avg_domain_disc_loss'])
+                print(f"epoch {epoch+1}/{n_epochs} (Val) Domain Discriminator Loss: {epoc_val_return['avg_domain_disc_loss']:.6f}")
+            
         if 'avg_domain_disc_loss' in epoc_val_return:
             val_metrics['val_domain_loss'].append(epoc_val_return['avg_domain_disc_loss'])
             print(f"epoch {epoch+1}/{n_epochs} (Val) Domain Discriminator Loss: {epoc_val_return['avg_domain_disc_loss']:.6f}")
