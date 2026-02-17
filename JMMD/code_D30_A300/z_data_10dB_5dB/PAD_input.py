@@ -135,7 +135,7 @@ def plot_magnitude_phase_histograms(
     ax_mag.set_ylabel('Count', fontsize=label_font)
     ax_mag.grid(True, alpha=0.3)
     if magnitude.mean()<1e-4:
-        ax_mag.text(0.98, 0.98, f'Mean: {magnitude.mean()*1e8:.3f}e8\nStd: {magnitude.std()*1e8:.3f}e8',
+        ax_mag.text(0.98, 0.98, f'Mean: {magnitude.mean()*1e8:.3f}e-8\nStd: {magnitude.std()*1e8:.3f}e-8',
                     transform=ax_mag.transAxes, verticalalignment='top', horizontalalignment='right',
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     else:
