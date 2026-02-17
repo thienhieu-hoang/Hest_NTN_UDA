@@ -2780,8 +2780,8 @@ def post_val(epoc_val_return, epoch, n_epochs, val_metrics, domain_weight=None):
                 val_metrics['val_domain_loss'].append(epoc_val_return['avg_domain_loss'])
                 print(f"epoch {epoch+1}/{n_epochs} (Val) domain Loss: {epoc_val_return['avg_domain_loss']:.6f}")
             if 'val_domain_disc_loss' in val_metrics:
-                val_metrics['val_domain_disc_loss'].append(epoc_val_return['avg_domain_disc_loss'])
-                print(f"epoch {epoch+1}/{n_epochs} (Val) Domain Loss: {epoc_val_return['avg_domain_disc_loss']:.6f}")
+                val_metrics['val_domain_disc_loss'].append(epoc_val_return['avg_domain_loss'])
+                print(f"epoch {epoch+1}/{n_epochs} (Val) Domain Loss: {epoc_val_return['avg_domain_loss']:.6f}")
             
         if 'avg_domain_disc_loss' in epoc_val_return:
             val_metrics['val_domain_loss'].append(epoc_val_return['avg_domain_disc_loss'])
@@ -2875,9 +2875,12 @@ def save_checkpoint_jmmd(model, save_model, model_path, sub_folder, epoch, metri
                 title='Training and Validating Estimation Loss', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Loss_est')
         # estimation loss: MSE loss, before de-scale
     if domain_weight!=0:
-        figLoss(line_list=[(metrics['train_domain_loss'], 'Training'), (metrics['val_domain_loss'], 'Validating')], xlabel='Epoch', ylabel='Domain Loss',
-                title='Training and Validating Domain Loss', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Loss_domain')
-
+        if 'val_domain_loss' in metrics:
+            figLoss(line_list=[(metrics['train_domain_loss'], 'Training'), (metrics['val_domain_loss'], 'Validating')], xlabel='Epoch', ylabel='Domain Loss',
+                    title='Training and Validating Domain Loss', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Loss_domain')
+        if 'val_domain_disc_loss' in metrics:
+            figLoss(line_list=[(metrics['train_domain_loss'], 'Training'), (metrics['val_domain_disc_loss'], 'Validating')], xlabel='Epoch', ylabel='Domain Loss',
+                    title='Training and Validating Domain Loss', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Loss_domain')
 
 class SimplePix2PixGenerator(tf.keras.Model):
     """
