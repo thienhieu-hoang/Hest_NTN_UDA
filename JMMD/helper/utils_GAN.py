@@ -1,4 +1,4 @@
-""" helper functions and classes for GAN model 
+""" helper functions and classes for model 
 """
 import tensorflow as tf
 import numpy as np
@@ -2763,6 +2763,11 @@ def post_val(epoc_val_return, epoch, n_epochs, val_metrics, domain_weight=None):
     val_metrics['val_est_loss'].append(epoc_val_return['avg_loss_est'])
     print(f"epoch {epoch+1}/{n_epochs} (Val) Average Estimation Loss (mean): {epoc_val_return['avg_loss_est']:.6f}")
     
+    if 'avg_loss_est_pseudo' in epoc_val_return:
+        val_metrics['val_est_loss_pseudo'].append(epoc_val_return['avg_loss_est_pseudo'])
+        print(f"epoch {epoch+1}/{n_epochs} (Val) Average Estimation Loss (Pseudo): {epoc_val_return['avg_loss_est_pseudo']:.6f}")
+    
+    
     val_metrics['val_est_loss_source'].append(epoc_val_return['avg_loss_est_source'])
     print(f"epoch {epoch+1}/{n_epochs} (Val) Average Estimation Loss (Source): {epoc_val_return['avg_loss_est_source']:.6f}")
     
@@ -2786,6 +2791,9 @@ def post_val(epoc_val_return, epoch, n_epochs, val_metrics, domain_weight=None):
         if 'avg_domain_disc_loss' in epoc_val_return:
             val_metrics['val_domain_loss'].append(epoc_val_return['avg_domain_disc_loss'])
             print(f"epoch {epoch+1}/{n_epochs} (Val) Domain Loss: {epoc_val_return['avg_domain_disc_loss']:.6f}")
+    
+    if 'avg_nmse_pseudo' in epoc_val_return:
+        val_metrics['nmse_val_pseudo'].append(epoc_val_return['avg_nmse_pseudo'])
     
     val_metrics['nmse_val_source'].append(epoc_val_return['avg_nmse_source'])
     val_metrics['nmse_val_target'].append(epoc_val_return['avg_nmse_target'])
@@ -2858,7 +2866,7 @@ def save_checkpoint_jmmd(model, save_model, model_path, sub_folder, epoch, metri
 
     figLoss(line_list=[(metrics['train_est_loss'], 'Train Loss - Source'), (metrics['val_est_loss_source'], 'Val Loss - Source'), (metrics['val_est_loss_target'], 'Val Loss - Target')], 
                 xlabel='Epoch', ylabel='Loss',
-                title='Estimation Losses', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='GAN_train')
+                title='Estimation Losses', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Estimation_loss')
     
     figLoss(line_list=[(metrics['train_est_loss'], 'GAN Generate Loss'), (metrics['train_disc_loss'], 'GAN Discriminator Loss')], xlabel='Epoch', ylabel='Loss',
                 title='Training GAN Losses', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='GAN_train')
