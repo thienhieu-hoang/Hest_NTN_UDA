@@ -83,7 +83,11 @@ def minmaxScaler(x, min_pre=None, max_pre=None, lower_range = -1, linear_interp=
     
     if linear_interp:
         if x_shape[1] == 312:
-            clip_fn = partial(clip_sample, a=1, b=309, c=3, d=12)
+            clip_fn = partial(clip_sample, a=0, b=309, c=2, d=12) # in MATLAB: 1:308, 3:12
+            # Apply over all samples
+            x = tf.map_fn(clip_fn, x)
+        if x_shape[1] == 132:
+            clip_fn = partial(clip_sample, a=0, b=128, c=2, d=12) # in MATLAB: 1:128, 3:12
             # Apply over all samples
             x = tf.map_fn(clip_fn, x)
     
