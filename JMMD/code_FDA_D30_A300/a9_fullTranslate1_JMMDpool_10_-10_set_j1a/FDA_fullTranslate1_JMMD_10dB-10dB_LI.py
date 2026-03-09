@@ -233,7 +233,7 @@ for sub_folder in sub_folder_:
         'train_loss': [],           # total training loss 
         'train_est_loss': [],       # estimation loss
         'train_disc_loss': [],      # discriminator loss
-        'train_domain_loss': [],    # CORAL loss (replaces domain loss)
+        'train_domain_loss': [],      # JMMD loss (replaces domain loss)
         'train_est_loss_target': [] # target estimation loss (monitoring)
     }
     
@@ -241,13 +241,13 @@ for sub_folder in sub_folder_:
     val_metrics = {
         'val_loss': [],                 # total validation loss
         'val_gan_disc_loss': [],        # GAN discriminator loss
-        'val_domain_disc_loss': [],     # CORAL loss (replaces domain discriminator)
+        'val_domain_disc_loss': [],     # JMMD loss (replaces domain discriminator)
         'val_est_loss_source': [],      # source estimation loss
         'val_est_loss_target': [],      # target estimation loss  
         'val_est_loss': [],             # average estimation loss
-        'source_acc': [],               # source domain accuracy (placeholder for CORAL)
-        'target_acc': [],               # target domain accuracy (placeholder for CORAL)
-        'acc': [],                      # average accuracy (placeholder for CORAL)
+        'source_acc': [],               # source domain accuracy (placeholder for JMMD)
+        'target_acc': [],               # target domain accuracy (placeholder for JMMD)
+        'acc': [],                      # average accuracy (placeholder for JMMD)
         'nmse_val_source': [],          # source NMSE
         'nmse_val_target': [],          # target NMSE
         'nmse_val': [],                  # average NMSE
@@ -259,7 +259,7 @@ for sub_folder in sub_folder_:
 
     # 
     model = CNNGenerator(n_blocks=4)
-    print("4 blocks, CORAL, extract layers = blocks 2, 3")
+    print("4 blocks, JMMD, extract layers = blocks 2, 3")
     jmmd_loss = JMMDLoss(enable_pooling=True)
     print("JMMD with Global average pooling")
     # 
