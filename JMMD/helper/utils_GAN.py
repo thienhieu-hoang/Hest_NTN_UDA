@@ -4183,7 +4183,8 @@ def val_step_wgan_gp_jmmd_residual(model, loader_H, loss_fn, lower_range, nsymb=
     return H_sample, epoc_eval_return
 
 def train_step_cnn_residual_jmmd(model_cnn, loader_H, loss_fn, optimizer, lower_range=-1, 
-                            save_features=False, nsymb=14, weights=None, linear_interp=False):
+                            jmmd_loss_fn=None, save_features=False, nsymb=14, weights=None, linear_interp=False,
+                            pca_components=256, pca_batch_size=64, pca_refit_batches=3):
     """
     CNN-only residual training step with JMMD domain adaptation (no discriminator)
     Model predicts residual correction instead of direct channel estimation
@@ -4210,7 +4211,8 @@ def train_step_cnn_residual_jmmd(model_cnn, loader_H, loss_fn, optimizer, lower_
     frequency_weight = weights.get('frequency_weight', 0.0)
     
     # Initialize JMMD for domain adaptation
-    jmmd_loss_fn = JMMDLossNormalized()
+    if jmmd_loss_fn is None:
+        jmmd_loss_fn = JMMDLossNormalized()
     
     epoc_loss_total = 0.0
     epoc_loss_est = 0.0
@@ -4219,6 +4221,17 @@ def train_step_cnn_residual_jmmd(model_cnn, loader_H, loss_fn, optimizer, lower_
     N_train = 0
     
     if save_features==True and (domain_weight != 0):
+        # === Incremental PCA setup (CPU RAM only) ===
+        pca_src = IncrementalPCA(n_components=pca_components, batch_size=pca_batch_size)
+        pca_tgt = IncrementalPCA(n_components=pca_components, batch_size=pca_batch_size)
+        pca_fitted = False
+
+        # how many batches to stack for first fit
+        batches_for_first_fit = int(np.ceil(pca_components / loader_H_input_train_src.batch_size))
+        refit_buffer_src = []
+        refit_buffer_tgt = []
+
+        # h5 files
         features_h5_path_source = 'features_source.h5'
         if os.path.exists(features_h5_path_source):
             os.remove(features_h5_path_source)
@@ -4227,9 +4240,11 @@ def train_step_cnn_residual_jmmd(model_cnn, loader_H, loss_fn, optimizer, lower_
 
         features_h5_path_target = 'features_target.h5'
         if os.path.exists(features_h5_path_target):
-            os.remove(features_h5_path_target)   
+            os.remove(features_h5_path_target)
         features_h5_target = h5py.File(features_h5_path_target, 'w')
         features_dataset_target = None
+    
+    epoc_loss_est_tgt = 0.0
     
     for batch_idx in range(loader_H_true_train_src.total_batches):
         # Get and preprocess data (same as before)
@@ -4295,32 +4310,22 @@ def train_step_cnn_residual_jmmd(model_cnn, loader_H, loss_fn, optimizer, lower_
             if model_cnn.losses:
                 total_loss += tf.add_n(model_cnn.losses)
         
+        # Calculate target estimation loss AFTER gradient update (no training impact)
+        est_loss_tgt = loss_fn_est(y_scaled_tgt, x_corrected_tgt)
+        epoc_loss_est_tgt += est_loss_tgt.numpy() * x_tgt.shape[0]
+        
         # === Save features if required ===
         if save_features and (domain_weight != 0):
-            # Save residual features
-            features_np_source = features_src[-1].numpy()
-            if features_dataset_source is None:
-                features_dataset_source = features_h5_source.create_dataset(
-                    'features',
-                    data=features_np_source,
-                    maxshape=(None,) + features_np_source.shape[1:],
-                    chunks=True
-                )
-            else:
-                features_dataset_source.resize(features_dataset_source.shape[0] + features_np_source.shape[0], axis=0)
-                features_dataset_source[-features_np_source.shape[0]:] = features_np_source
-                
-            features_np_target = features_tgt[-1].numpy()
-            if features_dataset_target is None:
-                features_dataset_target = features_h5_target.create_dataset(
-                    'features',
-                    data=features_np_target,
-                    maxshape=(None,) + features_np_target.shape[1:],
-                    chunks=True
-                )
-            else:
-                features_dataset_target.resize(features_dataset_target.shape[0] + features_np_target.shape[0], axis=0)
-                features_dataset_target[-features_np_target.shape[0]:] = features_np_target
+            pca_fitted, pca_src, pca_tgt, features_dataset_source, features_dataset_target = \
+                                        save_features_with_incremental_pca(
+                                            features_src, features_tgt,
+                                            pca_src, pca_tgt, pca_fitted,
+                                            refit_buffer_src, refit_buffer_tgt,
+                                            features_dataset_source, features_dataset_target,
+                                            features_h5_source, features_h5_target,
+                                            batch_idx, pca_components,
+                                            batches_for_first_fit, pca_refit_batches
+        )
         
         # Single optimizer update (no discriminator)
         grads = tape.gradient(total_loss, model_cnn.trainable_variables)
@@ -4331,7 +4336,7 @@ def train_step_cnn_residual_jmmd(model_cnn, loader_H, loss_fn, optimizer, lower_
         epoc_loss_est += est_loss.numpy() * x_src.shape[0]
         epoc_loss_jmmd += jmmd_loss.numpy() * x_src.shape[0]
         epoc_residual_norm += tf.reduce_mean(tf.abs(residual_src)).numpy() * x_src.shape[0]
-    
+
     # end batch loop
     if save_features and (domain_weight != 0):    
         features_h5_source.close()

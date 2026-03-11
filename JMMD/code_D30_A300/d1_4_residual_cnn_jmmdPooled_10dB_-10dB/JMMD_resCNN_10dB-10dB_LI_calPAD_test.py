@@ -25,9 +25,9 @@ from Domain_Adversarial.helper.utils_GAN import visualize_H
 from JMMD.helper.utils_GAN import save_checkpoint_jmmd as save_checkpoint
 from JMMD.helper.utils_GAN import WeightScheduler
 
-SNR = -10
+SNR = -5
 # source_data_file_path_label = os.path.abspath(os.path.join(code_dir, '..', 'generatedChan', 'OpenNTN','H_perfect.mat'))
-source_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_D_30_sim', f'SNR_10dB', 'matlabNTN.mat'))
+source_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_D_30_sim', f'SNR_-5dB', 'matlabNTN.mat'))
 target_data_file_path = os.path.abspath(os.path.join(code_dir, '..', '..', '..', 'generatedChan', 'MATLAB', 'TDL_A_300_sim', f'SNR_{SNR}dB', 'matlabNTN.mat'))
 norm_approach = 'minmax' # can be set to 'std'
 lower_range = -1 
@@ -39,7 +39,7 @@ lower_range = -1
 #     # Core loss weights
 #     'adv_weight': 0.05,        # GAN adversarial loss weight
 #     'est_weight': 0.6,          # Estimation loss weight (main task)
-#     'domain_weight': 1.5,       # JMMD loss weight (domain adaptation)
+#     'domain_weight': 1.5,       # CORAL loss weight (domain adaptation)
     
 #     # Smoothness regularization weights
 #     'temporal_weight': 0.02,    # Temporal smoothness penalty
@@ -47,7 +47,7 @@ lower_range = -1
 # }
 # print('adv_weight = ', weights['adv_weight'], ', est_weight = ', weights['est_weight'], ', domain_weight = ', weights['domain_weight'])
 
-scheduler = WeightScheduler(strategy='reconstruction_first', start_domain_weight=0.1e-3, end_domain_weight=7.5e-3,
+scheduler = WeightScheduler(strategy='reconstruction_first', start_domain_weight=0.01, end_domain_weight=1.5,
                             start_est_weight=1.5, end_est_weight=0.8, warmup_epochs=80) 
                             # adv_weight = 0.005 default
                             # warmup_epochs=150 default
@@ -72,7 +72,7 @@ model_path = code_dir + f'/results/ver' + str(idx_save_path) + '_'
 # figure_path = code_dir + '/model/GAN/ver' + str(idx_save_path) + '_/figure'
 model_readme = model_path + '/readme.txt'
 
-batch_size=16
+batch_size= 8 # 16
 
 # ============ Source data ==============
 source_file = h5py.File(source_data_file_path, 'r')
@@ -109,17 +109,17 @@ indices_target = np.resize(indices_target, N_samp)
 
 # =======================================================
 ## Divide the indices into training and validation sets
-indices_train_source = indices_source[:train_size]
-indices_val_source   = indices_source[train_size:train_size + val_size]
+# indices_train_source = indices_source[:train_size]
+# indices_val_source   = indices_source[train_size:train_size + val_size]
 
-indices_train_target = indices_target[:train_size]
-indices_val_target   = indices_target[train_size:train_size + val_size]
+# indices_train_target = indices_target[:train_size]
+# indices_val_target   = indices_target[train_size:train_size + val_size]
 
 # to test code
-# indices_train_source = indices_source[:96]
-# indices_val_source = indices_source[2032:]
-# indices_train_target = indices_target[:96]
-# indices_val_target = indices_target[2032:]
+indices_train_source = indices_source[:96]
+indices_val_source = indices_source[2032:]
+indices_train_target = indices_target[:96]
+indices_val_target = indices_target[2032:]
 
 print('train_size = ', indices_train_source.shape[0])
 print('val_size = ', indices_val_source.shape[0])
@@ -150,18 +150,22 @@ class_dict_target = {
 loss_fn_ce = tf.keras.losses.MeanSquaredError()  # Channel estimation loss (generator loss)
 loss_fn_bce = tf.keras.losses.BinaryCrossentropy(from_logits=False) # Binary cross-entropy loss for discriminator
 
-from JMMD.helper.utils_GAN import CNNGenerator, JMMDLoss
+from JMMD.helper.utils_GAN import CNNGenerator
 from JMMD.helper.utils_GAN import post_val, train_step_cnn_residual_jmmd, val_step_cnn_residual_jmmd
 
 import time
 start = time.perf_counter()
 
-n_epochs= 300 # 300
-epoch_min = 100
-epoch_step = 20
-# n_epochs= 5
-# epoch_min = 0
-# epoch_step = 1
+# n_epochs= 300 # 300
+# epoch_min = 100
+# epoch_step = 20
+n_epochs= 5
+epoch_min = 0
+epoch_step = 1
+
+pca_components = 256
+pca_batch_size = 64
+pca_refit_batches = 5
 
 sub_folder_ = ['GAN_linear']  # ['GAN_linear', 'GAN_practical', 'GAN_ls']
 
@@ -256,12 +260,12 @@ for sub_folder in sub_folder_:
     # 
     model = CNNGenerator(n_blocks=4)
     print("4 blocks, JMMD, no FDA, extract layers = blocks 2, 3")
+    # 
+    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4, beta_1=0.5, beta_2=0.9)
+    # 
+    from JMMD.helper.utils_GAN import JMMDLoss
     jmmd_loss = JMMDLoss(enable_pooling=True)
     print("JMMD with Global average pooling")
-    # 
-    ####
-    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4, beta_1=0.5, beta_2=0.9)
-    ####
     
     flag = 1 # flag to plot and save H_true
     epoc_pad = []    # epochs that calculating pad (return_features == True)
@@ -285,17 +289,18 @@ for sub_folder in sub_folder_:
         loss_fn = [loss_fn_ce, loss_fn_bce]
     
         ##########################
-        # if epoch==0 or epoch == n_epochs-1:
-        #     # return_features == return features to calculate PAD
-        #     return_features = True
-        #     epoc_pad.append(epoch)
-        # else:
-        #     return_features = False
+        if epoch==0 or epoch == n_epochs-1:
+            # return_features == return features to calculate PAD
+            return_features = True
+            epoc_pad.append(epoch)
+        else:
+            return_features = False
 
         ##########################
         # 
         train_step_output = train_step_cnn_residual_jmmd(model, loader_H, loss_fn, optimizer, lower_range=-1, 
-                        save_features=False, weights=weights, linear_interp=linear_interp)
+                        jmmd_loss_fn=jmmd_loss, save_features=return_features, weights=weights, linear_interp=linear_interp,
+                        pca_components=pca_components, pca_batch_size=pca_batch_size, pca_refit_batches=pca_refit_batches)
 
         train_epoc_loss_est        = train_step_output.avg_epoc_loss_est
         train_epoc_loss_d          = train_step_output.avg_epoc_loss_d
@@ -309,18 +314,20 @@ for sub_folder in sub_folder_:
                 # All are already calculated in average over training dataset (source/target - respectively)
         print("Time", time.perf_counter() - start, "seconds")
         # Calculate PAD for the extracted features
-        # if return_features and (weights['domain_weight']!=0) and (epoch==0 or epoch == n_epochs-1):
-        #     features_source_file = "features_source.h5"
-        #     features_target_file = "features_target.h5"
-        #     print(f"epoch {epoch+1}/{n_epochs}")
-        #     ## Calculate PCA_PAD for extracted features with PCA_SVM, PCA_LDA, PCA_LogReg
-        #     X_features, y_features = PAD.extract_features_with_pca(features_source_file, features_target_file, pca_components=100)
-        #     pad_svm_epoc = PAD.calc_pad_svm(X_features, y_features)
-        #     pad_lda_epoc = PAD.calc_pad_lda(X_features, y_features)
-        #     pad_logreg_epoc = PAD.calc_pad_logreg(X_features, y_features)
-        #     pad_metrics['pad_pca_svm'][f'epoch_{epoch+1}'] = pad_svm_epoc
-        #     pad_metrics['pad_pca_lda'][f'epoch_{epoch+1}'] = pad_lda_epoc
-        #     pad_metrics['pad_pca_logreg'][f'epoch_{epoch+1}'] = pad_logreg_epoc
+        if return_features and (weights['domain_weight']!=0) and (epoch==0 or epoch == n_epochs-1):
+            features_source_file = "features_source.h5"
+            features_target_file = "features_target.h5"
+            print(f"epoch {epoch+1}/{n_epochs}")
+            # ## Calculate PCA_PAD for extracted features with PCA_SVM, PCA_LDA, PCA_LogReg
+            # X_features, y_features = PAD.extract_features_with_pca(features_source_file, features_target_file, pca_components=100)
+            # pad_svm_epoc = PAD.calc_pad_svm(X_features, y_features)
+            # pad_lda_epoc = PAD.calc_pad_lda(X_features, y_features)
+            # pad_logreg_epoc = PAD.calc_pad_logreg(X_features, y_features)
+            # pad_metrics['pad_pca_svm'][f'epoch_{epoch+1}'] = pad_svm_epoc
+            # pad_metrics['pad_pca_lda'][f'epoch_{epoch+1}'] = pad_lda_epoc
+            # pad_metrics['pad_pca_logreg'][f'epoch_{epoch+1}'] = pad_logreg_epoc
+            pad_svm_epoc, _, _ = PAD.load_and_calculate_pad(features_source_file, features_target_file)
+            
             
         #     ## Distribution of extracted features
         #     plotfig.plotHist(features_source_file, fig_show = False, save_path=f"{model_path}/{sub_folder}/Distribution/", name=f'source_epoch_{epoch+1}', percent=99)
@@ -335,11 +342,11 @@ for sub_folder in sub_folder_:
         #     # w_dist.append(w_dist_epoc)
             
 
-        #     if os.path.exists(features_source_file):
-        #         os.remove(features_source_file)
-        #     if os.path.exists(features_target_file):
-        #         os.remove(features_target_file)
-        #     print("Time", time.perf_counter() - start, "seconds")
+            if os.path.exists(features_source_file):
+                os.remove(features_source_file)
+            if os.path.exists(features_target_file):
+                os.remove(features_target_file)
+            print("Time", time.perf_counter() - start, "seconds")
             
         
         # Average loss for the epoch
@@ -353,7 +360,7 @@ for sub_folder in sub_folder_:
         print(f"epoch {epoch+1}/{n_epochs} Average Disc Loss (in Source domain): {train_epoc_loss_d:.6f}")
         
         train_metrics['train_domain_loss'].append(train_epoc_loss_domain)
-        print(f"epoch {epoch+1}/{n_epochs} Average JMMD Loss: {train_epoc_loss_domain:.6f}")  # Updated print message
+        print(f"epoch {epoch+1}/{n_epochs} Average CORAL Loss: {train_epoc_loss_domain:.6f}")  # Updated print message
         
         train_metrics['train_est_loss_target'].append(train_epoc_loss_est_target)
         print(f"epoch {epoch+1}/{n_epochs} For observation only - Average Estimation Loss in Target domain: {train_epoc_loss_est_target:.6f}")
@@ -373,16 +380,16 @@ for sub_folder in sub_folder_:
         if (epoch==epoch_min) or (epoch+1>epoch_min and (epoch-epoch_min)%epoch_step==0) and epoch!=n_epochs-1:
             # 
             H_sample, epoc_val_return = val_step_cnn_residual_jmmd(model, loader_H_eval, loss_fn, lower_range, 
-                                            weights=weights, linear_interp=linear_interp)
+                                            jmmd_loss_fn=jmmd_loss, weights=weights, linear_interp=linear_interp)
             visualize_H(H_sample, H_to_save, epoch, plotfig.figChan, flag, model_path, sub_folder, domain_weight=weights['domain_weight'])
             flag = 0  # after the first epoch, no need to save H_true anymore
         elif epoch==n_epochs-1:
             _, epoc_val_return, H_val_gen = val_step_cnn_residual_jmmd(model, loader_H_eval, loss_fn, lower_range, 
-                                            weights=weights, linear_interp=linear_interp, return_H_gen=True)    
+                                            jmmd_loss_fn=jmmd_loss, weights=weights, linear_interp=linear_interp, return_H_gen=True)    
         else:
             # 
             _, epoc_val_return = val_step_cnn_residual_jmmd(model, loader_H_eval, loss_fn, lower_range, 
-                                        weights=weights, linear_interp=linear_interp)
+                                        jmmd_loss_fn=jmmd_loss, weights=weights, linear_interp=linear_interp)
         
         post_val(epoc_val_return, epoch, n_epochs, val_metrics, domain_weight=weights['domain_weight'])
         
@@ -412,4 +419,5 @@ for sub_folder in sub_folder_:
         {'H_val_gen': H_val_gen,
         'indices_val_source': indices_val_source,
         'indices_val_target': indices_val_target})
-# end of trainmode   (for sub_folder loop)
+# end of trainmode  
+
