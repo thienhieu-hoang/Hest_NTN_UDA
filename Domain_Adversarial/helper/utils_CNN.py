@@ -6,6 +6,7 @@ import pickle
 import h5py
 import sys
 import os 
+from dataclasses import dataclass
 
 try:
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -17,19 +18,33 @@ except NameError:
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
     
-from JMMD.helper.utils_GAN import CNNGenerator
-from Domain_Adversarial.helper.utils_GAN import train_step_Output
+from JMMD.helper.utils_GAN import CNNGenerator, save_features_with_incremental_pca
 
 from Domain_Adversarial.helper.utils import minmaxScaler, complx2real, deMinMax
 from Domain_Adversarial.helper.utils_GAN import gradient_penalty
 
 from JMMD.helper.utils_GAN import compute_total_smoothness_loss
+from sklearn.decomposition import IncrementalPCA
 
 
 # Domain labels
 def make_domain_labels(batch_size, domain):
     return tf.ones((batch_size, 1)) if domain == 'source' else tf.zeros((batch_size, 1))
 
+@dataclass
+class train_step_Output:
+    """Dataclass to hold the output of the train_step function."""
+    avg_epoc_loss_est: float  # Average loss for generator 
+    avg_epoc_loss_adv: float  # Average loss for adversarial loss 
+                                # forces CNN to make target features look like source features
+    avg_epoc_loss_domain: float # Average loss for domain discriminator (how well it distinguishes domains)
+    avg_epoc_loss: float
+    avg_epoc_loss_est_target: float  # Average loss for channel estimation on target domain
+    features_source: tf.Tensor = None  # Features from the source domain, if return_features is True
+    film_features_source: tf.Tensor = None  # Film features from the source domain, if return_features is True
+    features_target: tf.Tensor = None  # Features from the target domain, if return_features is True
+    film_features_target: tf.Tensor = None  # Film features from the target domain, if return_features is True
+    pad: float = 0
 
 class DomainDiscForCNN(tf.keras.Model):
     """
@@ -104,7 +119,8 @@ class DomainDiscForCNN(tf.keras.Model):
         return self.out(x) # (batch, 1) - domain probability            
 
 def train_step_cnn_residual_dann(model_cnn, domain_disc, loader_H, loss_fn, optimizers, lower_range=-1, 
-                                save_features=False, nsymb=14, weights=None, linear_interp=False):
+                                save_features=False, nsymb=14, weights=None, linear_interp=False,
+                                pca_components=256, pca_batch_size=64, pca_refit_batches=3):
     """
     CNN residual training step with DANN (Domain Adversarial Neural Networks)
     
@@ -149,17 +165,31 @@ def train_step_cnn_residual_dann(model_cnn, domain_disc, loader_H, loss_fn, opti
     
     # Feature saving setup
     if save_features and (adv_weight != 0):
-        features_h5_path_source = 'features_source_dann.h5'
+        # === Incremental PCA setup (CPU RAM only) ===
+        pca_src = IncrementalPCA(n_components=pca_components, batch_size=pca_batch_size)
+        pca_tgt = IncrementalPCA(n_components=pca_components, batch_size=pca_batch_size)
+        pca_fitted = False
+
+        # how many batches to stack for first fit
+        batches_for_first_fit = int(np.ceil(pca_components / loader_H_input_train_src.batch_size))
+        
+        refit_buffer_src = []
+        refit_buffer_tgt = []
+        
+        # h5 files
+        features_h5_path_source = 'features_source.h5'
         if os.path.exists(features_h5_path_source):
             os.remove(features_h5_path_source)
         features_h5_source = h5py.File(features_h5_path_source, 'w')
         features_dataset_source = None
 
-        features_h5_path_target = 'features_target_dann.h5'
+        features_h5_path_target = 'features_target.h5'
         if os.path.exists(features_h5_path_target):
-            os.remove(features_h5_path_target)   
+            os.remove(features_h5_path_target)
         features_h5_target = h5py.File(features_h5_path_target, 'w')
         features_dataset_target = None
+    
+    epoc_loss_est_tgt = 0.0
     
     # ============ BATCH LOOP ============
     for batch_idx in range(loader_H_true_train_src.total_batches):
@@ -277,35 +307,52 @@ def train_step_cnn_residual_dann(model_cnn, domain_disc, loader_H, loss_fn, opti
         cnn_optimizer.apply_gradients(zip(grads_cnn, model_cnn.trainable_variables))
         
         # ============ Save Features ============
-        if save_features and (adv_weight != 0):
-            features_np_source = features_src.numpy() if isinstance(features_src, list) else features_src.numpy()
-            if features_dataset_source is None:
-                features_dataset_source = features_h5_source.create_dataset(
-                    'features',
-                    data=features_np_source,
-                    maxshape=(None,) + features_np_source.shape[1:],
-                    chunks=True
-                )
-            else:
-                features_dataset_source.resize(features_dataset_source.shape[0] + features_np_source.shape[0], axis=0)
-                features_dataset_source[-features_np_source.shape[0]:] = features_np_source
+        # if save_features and (adv_weight != 0):
+        #     features_np_source = features_src.numpy() if isinstance(features_src, list) else features_src.numpy()
+        #     if features_dataset_source is None:
+        #         features_dataset_source = features_h5_source.create_dataset(
+        #             'features',
+        #             data=features_np_source,
+        #             maxshape=(None,) + features_np_source.shape[1:],
+        #             chunks=True
+        #         )
+        #     else:
+        #         features_dataset_source.resize(features_dataset_source.shape[0] + features_np_source.shape[0], axis=0)
+        #         features_dataset_source[-features_np_source.shape[0]:] = features_np_source
                 
-            features_np_target = features_tgt.numpy() if isinstance(features_tgt, list) else features_tgt.numpy()
-            if features_dataset_target is None:
-                features_dataset_target = features_h5_target.create_dataset(
-                    'features',
-                    data=features_np_target,
-                    maxshape=(None,) + features_np_target.shape[1:],
-                    chunks=True
-                )
-            else:
-                features_dataset_target.resize(features_dataset_target.shape[0] + features_np_target.shape[0], axis=0)
-                features_dataset_target[-features_np_target.shape[0]:] = features_np_target
+        #     features_np_target = features_tgt.numpy() if isinstance(features_tgt, list) else features_tgt.numpy()
+        #     if features_dataset_target is None:
+        #         features_dataset_target = features_h5_target.create_dataset(
+        #             'features',
+        #             data=features_np_target,
+        #             maxshape=(None,) + features_np_target.shape[1:],
+        #             chunks=True
+        #         )
+        #     else:
+        #         features_dataset_target.resize(features_dataset_target.shape[0] + features_np_target.shape[0], axis=0)
+        #         features_dataset_target[-features_np_target.shape[0]:] = features_np_target
+
+        # === Save features if required ===
+        if save_features and (adv_weight != 0):
+            pca_fitted, pca_src, pca_tgt, features_dataset_source, features_dataset_target = \
+                                        save_features_with_incremental_pca(
+                                            features_src, features_tgt,
+                                            pca_src, pca_tgt, pca_fitted,
+                                            refit_buffer_src, refit_buffer_tgt,
+                                            features_dataset_source, features_dataset_target,
+                                            features_h5_source, features_h5_target,
+                                            batch_idx, pca_components,
+                                            batches_for_first_fit, pca_refit_batches
+        )
+
+        # Calculate target estimation loss AFTER gradient update (no training impact)
+        est_loss_tgt = loss_fn_est(y_scaled_tgt, x_corrected_tgt)
+        epoc_loss_est_tgt += est_loss_tgt.numpy() * x_tgt.shape[0]
         
         # ============ Track Metrics ============
         epoc_loss_total += total_loss_cnn.numpy() * batch_size
         epoc_loss_est += est_loss.numpy() * batch_size
-        epoc_loss_adv_gen += adv_loss.numpy() * batch_size
+        epoc_loss_adv_gen += adv_loss.numpy() * batch_size # forces CNN to make target features look like source features
         epoc_loss_adv_disc += disc_loss.numpy() * batch_size
         epoc_residual_norm += tf.reduce_mean(tf.abs(residual_src)).numpy() * batch_size
         
@@ -324,10 +371,11 @@ def train_step_cnn_residual_dann(model_cnn, domain_disc, loader_H, loss_fn, opti
     # Calculate epoch averages
     avg_loss_total = epoc_loss_total / N_train
     avg_loss_est = epoc_loss_est / N_train
-    avg_loss_adv_gen = epoc_loss_adv_gen / N_train
-    avg_loss_adv_disc = epoc_loss_adv_disc / N_train
+    avg_loss_adv_gen = epoc_loss_adv_gen / N_train    # forces CNN to make target features look like source features
+    avg_loss_adv_disc = epoc_loss_adv_disc / N_train  # disc model to discriminate the 2 features
     avg_residual_norm = epoc_residual_norm / N_train
     avg_domain_acc = epoc_domain_acc / N_train
+    avg_loss_est_tgt = epoc_loss_est_tgt / N_train
     
     # Print metrics
     print(f"    Est Loss: {avg_loss_est:.6f} | Adv Gen Loss: {avg_loss_adv_gen:.6f} | " +
@@ -337,12 +385,12 @@ def train_step_cnn_residual_dann(model_cnn, domain_disc, loader_H, loss_fn, opti
     # Return compatible structure
     return train_step_Output(
         avg_epoc_loss_est=avg_loss_est,
-        avg_epoc_loss_domain=avg_loss_adv_gen,
+        avg_epoc_loss_adv=avg_loss_adv_gen, # forces CNN to make target features look like source features
         avg_epoc_loss=avg_loss_total,
-        avg_epoc_loss_est_target=avg_loss_adv_disc,
+        avg_epoc_loss_est_target=avg_loss_est_tgt,
         features_source= None,
         film_features_source= None,
-        avg_epoc_loss_d=avg_loss_adv_disc
+        avg_epoc_loss_domain=avg_loss_adv_disc   # disc model to discriminate the 2 features
     )
     
 def val_step_cnn_residual_dann(model_cnn, domain_disc, loader_H, loss_fn, lower_range, nsymb=14, weights=None, 

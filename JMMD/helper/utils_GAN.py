@@ -268,16 +268,16 @@ class WeightScheduler:
         
         if strategy == 'reconstruction_first':
             # Domain scheduling parameters
-            self.start_domain_weight = kwargs.get('start_domain_weight', 0.5)
-            self.end_domain_weight = kwargs.get('end_domain_weight', 1.5)
+            self.start_domain_weight = kwargs.get('start_domain_weight', 0.0)
+            self.end_domain_weight = kwargs.get('end_domain_weight', 0.0)
             self.warmup_epochs = kwargs.get('warmup_epochs', 150)
             self.schedule_type = kwargs.get('schedule_type', 'linear')  # 'linear', 'cosine', 'exponential'
             
             # Other weight parameters for reconstruction_first
             self.start_est_weight = kwargs.get('start_est_weight', 1.0)
             self.end_est_weight = kwargs.get('end_est_weight', 1.0)  # Can be different if desired
-            self.start_adv_weight = kwargs.get('start_adv_weight', 0.005)
-            self.end_adv_weight = kwargs.get('end_adv_weight', 0.005)  # Can be different if desired
+            self.start_adv_weight = kwargs.get('start_adv_weight', 0.0)
+            self.end_adv_weight = kwargs.get('end_adv_weight', 0.0)  # Can be different if desired
             
             print(f"WeightScheduler initialized with reconstruction_first strategy:")
             print(f"  - Domain weight: {self.start_domain_weight} → {self.end_domain_weight}")
@@ -2792,6 +2792,11 @@ def post_val(epoc_val_return, epoch, n_epochs, val_metrics, domain_weight=None):
             val_metrics['val_domain_loss'].append(epoc_val_return['avg_domain_disc_loss'])
             print(f"epoch {epoch+1}/{n_epochs} (Val) Domain Loss: {epoc_val_return['avg_domain_disc_loss']:.6f}")
     
+    if 'val_adv_loss' in val_metrics: 
+        val_metrics['val_adv_loss'].append(epoc_val_return['avg_domain_adv_loss'])
+        print(f"epoch {epoch+1}/{n_epochs} (Val) Adversarial Loss: {epoc_val_return['avg_domain_adv_loss']:.6f}")
+        # How well CNN fools discriminator
+        
     if 'avg_nmse_pseudo' in epoc_val_return:
         val_metrics['nmse_val_pseudo'].append(epoc_val_return['avg_nmse_pseudo'])
     
@@ -2868,8 +2873,13 @@ def save_checkpoint_jmmd(model, save_model, model_path, sub_folder, epoch, metri
                 xlabel='Epoch', ylabel='Loss',
                 title='Estimation Losses', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Estimation_loss')
     
-    figLoss(line_list=[(metrics['train_est_loss'], 'GAN Generate Loss'), (metrics['train_disc_loss'], 'GAN Discriminator Loss')], xlabel='Epoch', ylabel='Loss',
-                title='Training GAN Losses', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='GAN_train')
+    # figLoss(line_list=[(metrics['train_est_loss'], 'GAN Generate Loss'), (metrics['train_disc_loss'], 'GAN Discriminator Loss')], xlabel='Epoch', ylabel='Loss',
+    #             title='Training GAN Losses', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='GAN_train')
+    
+    if 'train_adv_loss' in metrics:
+        figLoss(line_list=[(metrics['train_adv_loss'], 'Training'), (metrics['val_adv_loss'], 'Validating')], xlabel='Epoch', ylabel='Adversarial Loss',
+                title='Training and Validating Adversarial Loss', index_save=1, figure_save_path= model_path + '/' + sub_folder + '/performance', fig_name='Loss_adv')
+        # How well CNN fools discriminator
     
     # to plot from epoch 30 if length > 35:
     train_loss_data = metrics['train_loss'][30:] if len(metrics['train_loss']) > 35 else metrics['train_loss']
