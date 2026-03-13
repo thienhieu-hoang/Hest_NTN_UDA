@@ -641,7 +641,7 @@ def val_step_cnn_residual_dann(model_cnn, domain_disc, loader_H, loss_fn, lower_
     print(f"    Val Domain Acc - Source: {avg_domain_acc_source:.4f} | Target: {avg_domain_acc_target:.4f} | Overall: {avg_domain_acc:.4f}")
     print(f"    Val Residual Norm - Source: {avg_residual_norm_src:.6f} | Target: {avg_residual_norm_tgt:.6f}")
 
-    # Total validation loss (includes all components for monitoring)
+    # Total validation loss (includes all components for monitoring) (not include disc_loss)
     avg_total_loss = (est_weight * avg_loss_est + 
                     adv_weight * avg_domain_adv_loss + 
                     avg_smoothness_loss)
