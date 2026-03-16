@@ -47,7 +47,7 @@ lower_range = -1
 # }
 # print('adv_weight = ', weights['adv_weight'], ', est_weight = ', weights['est_weight'], ', domain_weight = ', weights['domain_weight'])
 
-scheduler = WeightScheduler(strategy='reconstruction_first', start_domain_weight=0.01, end_domain_weight=1.5,
+scheduler = WeightScheduler(strategy='reconstruction_first', start_domain_weight=0.01, end_domain_weight=1.5e4,
                             start_est_weight=1.5, end_est_weight=0.8, warmup_epochs=80) 
                             # adv_weight = 0.005 default
                             # warmup_epochs=150 default
